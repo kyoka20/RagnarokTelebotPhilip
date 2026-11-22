@@ -1477,7 +1477,7 @@ class Bot:
     def p_rekor(self, chat_id, _isi):
         """/rekor - poster Hall of Fame & motivasi Philip (total klien, tembus target, top 5, streak)."""
         try:
-            daftar = [(pid, p) for pid, p, _, _ in self._daftar_semua()]
+            daftar = [(pid, p) for pid, p, _, _ in self._daftar_karakter()]
             hasil = rapor.buat_hof(daftar, str(self.cfg.get("rapor_catatan_kaki") or ""))
         except Exception as e:
             self.log.exception("Gagal membuat Hall of Fame")
@@ -1536,7 +1536,7 @@ class Bot:
     def p_papan(self, chat_id, _isi):
         """/papan - dashboard Kanban visual antrean orderan (Prioritas Kerja | Siap Ditagih | Lunas)."""
         try:
-            daftar = [(pid, p) for pid, p, _, _ in self._daftar_semua()]
+            daftar = [(pid, p) for pid, p, _, _ in self._daftar_karakter()]
             hasil = visual.buat_papan(daftar, str(self.cfg.get("rapor_catatan_kaki") or ""))
         except Exception as e:
             self.log.exception("Gagal membuat papan")
@@ -1552,7 +1552,7 @@ class Bot:
 
     def p_siar_tutor(self, chat_id, _isi):
         """(Dev) Kirim tutorial singkat fitur baru + contoh nyata (/papan & /gif) ke Philip + dev."""
-        daftar = [(pid, p) for pid, p, _, _ in self._daftar_semua()]
+        daftar = [(pid, p) for pid, p, _, _ in self._daftar_karakter()]
         kaki = str(self.cfg.get("rapor_catatan_kaki") or "")
         teks = (
             "🚀 <b>Update Fitur Baru Bot DPS Philip!</b>\n\n"
