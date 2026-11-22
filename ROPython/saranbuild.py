@@ -210,52 +210,151 @@ def _ringkas_dps(pid: str, target: int | None) -> list[str]:
     return baris
 
 
+def _nama_stat_awam(label: str) -> str:
+    """Ubah label teknis seperti 'DMG vs Medium +5%' -> bahasa singkat yang langsung paham."""
+    s = re.sub(r"\s*\+\d+(?:\.\d+)?%?", "", label).strip()
+    peta = {
+        "DMG vs Human": "Kartu/Stat vs Human",
+        "DMG vs Medium": "Kartu/Stat vs Medium",
+        "DMG vs Neutral": "Kartu/Stat vs Neutral",
+        "P.DMG Bonus": "P.DMG%",
+        "M.DMG Bonus": "M.DMG%",
+        "Elemental DMG": "Elemental DMG%",
+        "Skill DMG": "Skill DMG%",
+        "CRIT DMG": "CRIT DMG%",
+        "Ignore P.DEF": "Ignore DEF",
+        "Ignore M.DEF": "Ignore M.DEF",
+        "Final DMG": "Final DMG%",
+    }
+    return peta.get(s, s)
+
+
+def _kartu_rekomendasi(st: dict, sasaran_test: dict) -> list[str]:
+    """Cari 1-2 saran kartu paling konkret untuk sasaran dummy."""
+    import sasaran
+    kartu = sasaran.kartu_cocok(sasaran_test)
+    saran_k = []
+    for nama_stat, kata in (
+        (f"DMG vs {sasaran_test['ukuran']}%", sasaran_test["ukuran"]),
+        (f"DMG vs {sasaran_test['elemen']}%", sasaran_test["elemen"]),
+        (f"DMG vs {sasaran_test['ras']}%", sasaran_test["ras"]),
+    ):
+        val = sasaran._f(st.get(nama_stat, 0))
+        if kata == "Human":
+            val += sasaran._f(st.get("DMG vs Demi-Human%", 0))
+        if val == 0:
+            calon = [k for k in kartu if kata.lower() in k[2].lower() or (kata == "Human" and "demi-human" in k[2].lower())][:1]
+            if calon:
+                n, slot, _ = calon[0]
+                saran_k.append(f"<b>{n}</b> ({slot}, bonus vs {kata})")
+    return saran_k
+
+
 def saran(pid: str, profil: dict, sasaran_test: dict) -> list[str]:
     import bacabuild
     import rumus
     import sasaran
     import statistik
+
     nama = profil.get("nick") or profil.get("nama") or pid
     job = profil.get("job") or ""
-    baris = [f"🧭 <b>Saran build: {nama}</b>" + (f" ({job})" if job else "")]
-    baris += _ringkas_dps(pid, profil.get("target"))
-
-    # Data panel Statistics terakhir (damage per skill), jika ada
+    target = int(profil.get("target") or 0)
+    ok = catatan.baca_ok(pid)
+    log = bacabuild.baca_log(pid)
     stat_log = statistik.baca_log(pid)
     sumber_skill = stat_log[-1].get("sumber") if stat_log else None
-    if sumber_skill:
-        top = sumber_skill[:3]
-        baris += ["", "⚡ Damage utama (Statistics): " + ", ".join(f"{r['nama']} {r['persen']:g}%" for r in top)]
+    items, sumber_ench = build_karakter(pid)
 
-    # Stat vs sasaran + simulasi prioritas stat (rumus.py)
-    log = bacabuild.baca_log(pid)
-    is_magic = False
-    if log:
-        st = {}
-        for _, s in log:
-            st.update(s)
-        an = sasaran.analisis(st, sasaran_test)
-        if an:
-            baris += ["", f"📊 Stat (terakhir dibaca {log[-1][0]:%d/%m %H:%M}):"] + an
+    st = {}
+    for _, s in log:
+        st.update(s)
+
+    prio, warn, pb = ([], [], {"magic": False, "ranged": False})
+    if st:
         prio, warn, pb = rumus.prioritas_stat(st, sasaran_test, job, sumber_skill)
-        is_magic = pb["magic"]
-        if prio:
-            tipe = "Magic" if pb["magic"] else ("Fisik Ranged" if pb["ranged"] else "Fisik Melee")
-            baris += ["", f"🧮 Prioritas naik stat ({tipe}, simulasi DPS):"]
-            for i, p in enumerate(prio[:4], 1):
-                baris.append(f"{i}. {p['label']} → est. <b>+{p['naik_pct']:.2f}% DPS</b>")
-            baris += warn[:2]
-            baris.append("   Ketik <code>/sim +10% pdmg</code> (atau stat lain) untuk hitung proyeksi DPS.")
-    else:
-        baris += ["", "📊 Stat belum tersimpan → buka Character Info > Detailed Stats sekali."]
+    tipe = "Magic" if pb["magic"] else ("Fisik Ranged" if pb["ranged"] else "Fisik Melee")
 
-    # Enchant
-    items, sumber = build_karakter(pid)
-    if items:
-        e = saran_enchant(items)
-        baris += ["", f"💎 Enchant (dari {sumber}):"] + (e or ["Semua set DPS sudah optimal untuk data yang terlihat."])
-        if is_magic:
-            baris.append("ℹ️ Karakter Magic: pastikan pilih gem/set M.ATK & MDMG (data set Magic terisi otomatis saat halaman Enchant dibuka).")
+    # ---------------- Header singkat ----------------
+    baris = [f"🧭 <b>Saran Build: {nama}</b>" + (f" ({job})" if job else (f" [{tipe}]" if st else ""))]
+    tembus = False
+    if ok:
+        rekor = max(ok, key=lambda r: r["dps"])
+        akhir = ok[-1]
+        if target and rekor["dps"] >= target:
+            tembus = True
+            baris.append(f"⚔️ Rekor <b>{umum.fmt(rekor['dps'])}</b> — 🎯 <b>TARGET {umum.fmt(target)} SUDAH TEMBUS!</b>")
+        elif target:
+            kurang = target - rekor["dps"]
+            pct_k = (target / rekor["dps"] - 1) * 100
+            baris.append(f"⚔️ Rekor <b>{umum.fmt(rekor['dps'])}</b> / Target {umum.fmt(target)} (kurang {umum.fmt(kurang)} / +{pct_k:.1f}%)")
+        else:
+            baris.append(f"⚔️ Rekor <b>{umum.fmt(rekor['dps'])}</b> | terakhir {umum.fmt(akhir['dps'])} ({len(ok)} test)")
     else:
-        baris += ["", "💎 Enchant belum terlihat → buka halaman Enchant (pilih Weapon/Acc/Head/Back)."]
+        baris.append("⚔️ Belum ada hasil test DPS.")
+
+    # ---------------- KESIMPULAN: LAKUKAN INI DULU ----------------
+    langkah: list[str] = []
+    if tembus:
+        langkah.append("Target sudah tercapai! Tinggal kirim <code>/rapor</code> atau <code>/gif</code> ke pembeli.")
+    else:
+        # 1) Kartu / stat terbuang atau masih 0%
+        if st:
+            _, buang = sasaran.stat_sasaran(sasaran_test)
+            terbuang = [(n, st[n]) for n in buang if sasaran._f(st.get(n, 0)) > 0]
+            total_buang = sum(sasaran._f(v) for _, v in terbuang)
+            kartu_saran = _kartu_rekomendasi(st, sasaran_test)
+            if total_buang >= 5:
+                langkah.append(f"<b>Ganti kartu/equip yg salah sasaran</b> (ada {total_buang:.0f}% bonus ke ras/elemen lain yg tidak ngefek di Dummy).")
+            if kartu_saran:
+                langkah.append("<b>Pasang kartu yg masih kosong:</b> " + " atau ".join(kartu_saran[:2]) + " — efeknya langsung terasa di Dummy.")
+            # 2) Stat paling ngebut buat dinaikkan
+            if prio:
+                top_stat = [_nama_stat_awam(p["label"]) for p in prio[:3]]
+                # Hilangkan duplikat
+                top_unik = list(dict.fromkeys(top_stat))
+                langkah.append("<b>Fokus naikkan stat ini dulu:</b> " + ", ".join(top_unik) + ".")
+            # 3) Jangan buang stat yang sudah mentok cap
+            for w in warn[:1]:
+                bersih = w.lstrip("⚠️✅ℹ️ ").strip()
+                langkah.append(f"<b>Jangan tambah lagi:</b> {bersih}")
+        else:
+            langkah.append("Buka halaman <b>Character Info → Detailed Stats</b> di game sekali (scroll sampai bawah), supaya bot tahu stat apa yang kurang.")
+
+        # 4) Batu Enchant paling murah dinaikkan
+        e_list = saran_enchant(items) if items else []
+        if e_list:
+            pertama = e_list[0].replace("\n      ", " ").lstrip("12345. ")
+            langkah.append(f"<b>Upgrade batu Enchant termurah:</b> {pertama}")
+        elif not items:
+            langkah.append("Buka halaman <b>Enchant</b> di game (klik Weapon/Acc/Head/Back) biar bot bisa urutkan batu termurah.")
+
+        # 5) Skill utama dari Statistics (kalau ada)
+        if sumber_skill:
+            utama = sumber_skill[0]
+            langkah.append(f"Damage terbesar dari <b>{utama['nama']} ({utama['persen']:g}%)</b> — prioritaskan kartu/rune/affix yang memperkuat skill ini.")
+
+    baris += ["", "🎯 <b>KESIMPULAN — LAKUKAN INI DULU:</b>"]
+    for i, l in enumerate(langkah[:4], 1):
+        baris.append(f"{i}. {l}")
+
+    # ---------------- Detail Singkat (opsional, biar tetap informatif) ----------------
+    detail: list[str] = []
+    if st:
+        pakai, _ = sasaran.stat_sasaran(sasaran_test)
+        ada = [f"{n.replace('DMG vs ', 'vs ')} {st[n]}" for n in pakai if n in st and sasaran._f(st[n]) > 0]
+        if ada:
+            detail.append("✅ Bonus aktif di Dummy: " + ", ".join(ada))
+        if prio:
+            detail.append("📈 Efek tiap +5% stat: " + " · ".join(f"{p['singkat']} (+{p['naik_pct']:.1f}%)" for p in prio[:3]))
+    if items:
+        e_list = saran_enchant(items)
+        if len(e_list) > 1:
+            detail.append("💎 Urutan batu lain: " + " | ".join(x.splitlines()[0].lstrip("12345. ") for x in e_list[1:3]))
+        if pb["magic"]:
+            detail.append("ℹ️ Karakter Magic: pakai gem/set M.ATK & M.DMG.")
+
+    if detail:
+        baris += ["", "📋 <b>Catatan Singkat:</b>"] + detail
+
+    baris.append("\n💡 Mau hitung efek sebelum ganti build? Ketik <code>/sim +10% pdmg</code> (atau <code>/sim +300 matk</code>).")
     return baris
