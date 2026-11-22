@@ -1,0 +1,22 @@
+# Rahasia & konfigurasi lokal (JANGAN pernah masuk Git!)
+ROPython/config.json
+**/config.json
+
+# Data klien, log, cadangan, & file besar
+ROPython/data/
+ROPython/log/
+ROPython/cadangan_update/
+ROPython/database_ikon/
+ROPython/database_lokal/enchant_belajar.json
+ROPython/BOT_DIMATIKAN.txt
+ROPython/.venv/
+ROPython/python/
+ROPython/contoh/
+ROPython/motion_graphic/
+ROPython.zip
+*.zip
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+Thumbs.db

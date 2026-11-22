@@ -1,0 +1,29 @@
+{
+  "telegram": {
+    "token": "ISI_TOKEN_DARI_BOTFATHER",
+    "chat_id_diizinkan": [123456789]
+  },
+  "profil_aktif": "akun1",
+  "mode": "perubahan",
+  "interval_detik": 1,
+  "rapor_catatan_kaki": "",
+  "judul_jendela_game": "Ragnarok: The New World",
+  "kirim_layar_penuh": false,
+  "peringatan_gagal_berturut": 0,
+  "peringatan_tanpa_hasil_menit": 0,
+  "ocr": {
+    "mesin": "auto",
+    "bahasa": "en-US",
+    "perbesar": 2,
+    "ambang": 190,
+    "tesseract_path": ""
+  },
+  "profil": {
+    "akun1": {
+      "nama": "Akun 1",
+      "target": 3000000,
+      "label": "DMG Per Second",
+      "area": null
+    }
+  }
+}
