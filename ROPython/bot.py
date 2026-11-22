@@ -43,6 +43,7 @@ import saranbuild
 import sasaran
 import statistik
 import umum
+import visual
 from telegram_api import Pengirim, Telegram, TelegramError, TelegramSementara, potong_pesan
 
 BANTUAN = """<b>Daftar perintah</b>
@@ -55,6 +56,9 @@ BANTUAN = """<b>Daftar perintah</b>
 /pindah - pindahkan hasil DPS terakhir ke karakter aktif (kalau salah masuk)
 /rapor - gambar rapor premium (sebelum vs sesudah + grafik) untuk dikirim ke pembeli
 /rapor 2 - rapor karakter no. 2
+/gif - animasi Before -> After siap forward ke klien / WA Story (/gif 2)
+/story - poster vertikal 9:16 siap upload WA Status / TikTok (/story 2)
+/papan - dashboard visual antrean orderan (Prioritas Kerja | Siap Ditagih | Lunas)
 /grafik - grafik kurva perjalanan DPS 1 karakter (/grafik 2)
 /rekor - poster Hall of Fame & motivasi (top kenaikan, top DPS, streak)
 /arsip - file Excel semua pembeli
@@ -90,7 +94,9 @@ Karakter otomatis ganti saat Anda membuka halaman info karakter (yang ada ID-nya
 MENU = [("input", "Isi / ubah data pembeli"), ("daftar", "Semua karakter + DPS terakhir"),
         ("lihat", "Foto & detail karakter (contoh: /lihat 2)"), ("pilih", "Pilih karakter aktif (contoh: /pilih 2)"),
         ("pindah", "Pindahkan hasil terakhir ke karakter aktif"),
-        ("rapor", "Gambar rapor premium untuk pembeli"), ("grafik", "Grafik tren DPS karakter"),
+        ("rapor", "Gambar rapor premium untuk pembeli"), ("gif", "Animasi Before->After siap forward"),
+        ("story", "Poster vertikal 9:16 untuk Story/TikTok"), ("papan", "Dashboard antrean orderan"),
+        ("grafik", "Grafik tren DPS karakter"),
         ("rekor", "Poster Hall of Fame & motivasi"), ("arsip", "File Excel semua pembeli"),
         ("hari", "Ringkasan waktu kerja hari ini"),
         ("tagihan", "Pembeli belum lunas"),
@@ -1253,13 +1259,14 @@ class Bot:
         m = re.fullmatch(r"(/[a-z_]+?)(\d+)", perintah)  # salah ketik spasi: "/lihat24" = "/lihat 24"
         if m:
             perintah, isi = m.group(1), f"{m.group(2)} {isi}".strip()
-        if perintah in ("/update", "/auto_update", "/tarik_update", "/dev_mode", "/devmode", "/log", "/restart", "/dev", "/data_latih", "/pemakaian"):
+        if perintah in ("/update", "/auto_update", "/tarik_update", "/siar_tutor", "/dev_mode", "/devmode", "/log", "/restart", "/dev", "/data_latih", "/pemakaian"):
             if chat_id not in self.dev_ids:
                 self.balas(chat_id, "Perintah ini khusus developer.")
                 return
             {"/update": lambda c, i: self.p_update(c, i, pesan),
              "/auto_update": self.p_auto_update,
              "/tarik_update": lambda c, i: self.p_auto_update(c, "cek"),
+             "/siar_tutor": self.p_siar_tutor,
              "/dev_mode": self.p_dev_mode,
              "/devmode": self.p_dev_mode, "/log": self.p_log, "/restart": self.p_restart,
              "/data_latih": self.p_data_latih,
@@ -1273,6 +1280,9 @@ class Bot:
             "/matikan": self.p_matikan, "/shutdown": self.p_matikan,
             "/daftar": self.p_daftar, "/list": self.p_daftar,"/lihat": self.p_lihat, "/pilih": self.p_pilih, "/rapor": self.p_rapor,
             "/grafik": self.p_grafik, "/chart": self.p_grafik,
+            "/gif": self.p_gif, "/animasi": self.p_gif,
+            "/story": self.p_story, "/poster": self.p_story,
+            "/papan": self.p_papan, "/board": self.p_papan, "/antrean": self.p_papan,
             "/rekor": self.p_rekor, "/hof": self.p_rekor, "/prestasi": self.p_rekor,
             "/input": self.p_input, "/arsip": self.p_arsip, "/batal": lambda c, i: None,
             "/pindah": self.p_pindah, "/hari": self.p_hari, "/ringkasan": self.p_hari, "/db": self.p_db,
@@ -1481,6 +1491,112 @@ class Bot:
                f"👥 {info['klien']} klien · 🎯 {info['tembus']} tembus target · "
                f"🔥 Streak {info['streak']} hari ({info['test']} test)")
         self.kirim.tambah("rekor", self.tg.kirim_foto, chat_id, jpg, cap, "hall_of_fame.jpg")
+
+    def p_gif(self, chat_id, isi):
+        """/gif [nama/nomor] - animasi GIF Before -> After siap forward klien / WA Story."""
+        pilih = self._pilih_karakter(chat_id, isi)
+        if not pilih:
+            return
+        pid, p = pilih[0], pilih[1]
+        self.balas(chat_id, f"🎬 Merender animasi <b>{self.nama_akun(p)}</b>...")
+        try:
+            hasil = visual.buat_gif(pid, p, str(self.cfg.get("rapor_catatan_kaki") or ""))
+        except Exception as e:
+            self.log.exception("Gagal membuat GIF")
+            self.balas(chat_id, f"Gagal membuat animasi: {html.escape(str(e))}")
+            return
+        if not hasil:
+            self.balas(chat_id, f"<b>{self.nama_akun(p)}</b> belum punya hasil DPS tersimpan.")
+            return
+        gif_bytes, r = hasil
+        cap = (f"🎬 <b>{self.nama_akun(p)}</b>: {umum.fmt(r['awal'])} → <b>{umum.fmt(r['terbaik'])}</b> "
+               f"({r['naik']:+.1f}%)".replace(".", ","))
+        self.kirim.tambah("gif", self.tg.kirim_animasi, chat_id, gif_bytes, cap, "progres_dps.gif")
+
+    def p_story(self, chat_id, isi):
+        """/story [nama/nomor] - poster vertikal 9:16 siap upload WA Status / TikTok / IG Story."""
+        pilih = self._pilih_karakter(chat_id, isi)
+        if not pilih:
+            return
+        pid, p = pilih[0], pilih[1]
+        try:
+            hasil = visual.buat_story(pid, p, str(self.cfg.get("rapor_catatan_kaki") or ""))
+        except Exception as e:
+            self.log.exception("Gagal membuat Story")
+            self.balas(chat_id, f"Gagal membuat Story: {html.escape(str(e))}")
+            return
+        if not hasil:
+            self.balas(chat_id, f"<b>{self.nama_akun(p)}</b> belum punya hasil DPS tersimpan.")
+            return
+        jpg, r = hasil
+        cap = (f"📱 Poster 9:16 <b>{self.nama_akun(p)}</b> ({r['naik']:+.1f}%) — siap upload WA Status / TikTok!"
+               .replace(".", ","))
+        self.kirim.tambah("story", self.tg.kirim_foto, chat_id, jpg, cap, "story_dps.jpg")
+
+    def p_papan(self, chat_id, _isi):
+        """/papan - dashboard Kanban visual antrean orderan (Prioritas Kerja | Siap Ditagih | Lunas)."""
+        try:
+            daftar = [(pid, p) for pid, p, _, _ in self._daftar_semua()]
+            hasil = visual.buat_papan(daftar, str(self.cfg.get("rapor_catatan_kaki") or ""))
+        except Exception as e:
+            self.log.exception("Gagal membuat papan")
+            self.balas(chat_id, f"Gagal membuat papan: {html.escape(str(e))}")
+            return
+        if not hasil:
+            self.balas(chat_id, "Belum ada data klien tersimpan.")
+            return
+        jpg, info = hasil
+        cap = (f"📋 <b>Papan Antrean Orderan</b>\n"
+               f"🟠 {info['proses']} Prioritas Kerja · 🟢 {info['siap']} Siap Ditagih · 🔵 {info['lunas']} Lunas")
+        self.kirim.tambah("papan", self.tg.kirim_foto, chat_id, jpg, cap, "papan_orderan.jpg")
+
+    def p_siar_tutor(self, chat_id, _isi):
+        """(Dev) Kirim tutorial singkat fitur baru + contoh nyata (/papan & /gif) ke Philip + dev."""
+        daftar = [(pid, p) for pid, p, _, _ in self._daftar_semua()]
+        kaki = str(self.cfg.get("rapor_catatan_kaki") or "")
+        teks = (
+            "🚀 <b>Update Fitur Baru Bot DPS Philip!</b>\n\n"
+            "Biar kerja makin cepat & konten promosi makin keren, ini perintah baru yang bisa langsung dicoba:\n\n"
+            "1️⃣ <b>/papan</b> — Papan antrean orderan visual (langsung kelihatan mana akun yang paling dekat target & mana yang siap ditagih)\n"
+            "2️⃣ <b>/gif</b> (atau <code>/gif 2</code>) — Animasi Before → After otomatis, tinggal forward ke klien / WA Story\n"
+            "3️⃣ <b>/story</b> (atau <code>/story 2</code>) — Poster vertikal 9:16 siap upload WA Status / TikTok\n"
+            "4️⃣ <b>/rapor</b> — Desain rapor baru + grafik kurva progres & Rank Badge\n"
+            "5️⃣ <b>/rekor</b> — Poster Hall of Fame & Streak kamu\n"
+            "6️⃣ <b>/sim +10% pdmg</b> — Simulasi kenaikan DPS sebelum ganti build (bisa gabung: <code>/sim +300 matk +15% vs medium</code>)\n"
+            "7️⃣ <b>/saran</b> &amp; <b>/db</b> — Sekarang ada prioritas stat, Affix/Stunt, Pet, Rune, Apocalypse, dan Refine!\n\n"
+            "👇 Di bawah ini contoh langsung dari datamu:"
+        )
+        self.siarkan_teks(teks)
+        # Kirim contoh /papan
+        try:
+            papan = visual.buat_papan(daftar, kaki)
+            if papan:
+                jpg, _ = papan
+                for cid in self.penerima:
+                    self.kirim.tambah("tutor-papan", self.tg.kirim_foto, cid, jpg,
+                                      "📋 Contoh <b>/papan</b> — cek antrean & prioritas kerja tiap hari", "papan.jpg")
+        except Exception:
+            self.log.exception("Gagal kirim contoh papan")
+        # Cari 1 klien dengan kenaikan bagus + punya foto untuk contoh /gif
+        calon = None
+        for pid, p in daftar:
+            if pid == "akun1":
+                continue
+            ok = catatan.baca_ok(pid)
+            if len(ok) >= 3 and ok[-1]["dps"] > ok[0]["dps"]:
+                calon = (pid, p)
+                break
+        if calon:
+            try:
+                g = visual.buat_gif(calon[0], calon[1], kaki)
+                if g:
+                    gif_bytes, _ = g
+                    for cid in self.penerima:
+                        self.kirim.tambah("tutor-gif", self.tg.kirim_animasi, cid, gif_bytes,
+                                          f"🎬 Contoh <b>/gif</b> ({self.nama_akun(calon[1])}) — tinggal forward ke klien!",
+                                          "contoh_progres.gif")
+            except Exception:
+                self.log.exception("Gagal kirim contoh gif")
 
     def p_lihat(self, chat_id, isi):
         pilih = self._pilih_karakter(chat_id, isi)

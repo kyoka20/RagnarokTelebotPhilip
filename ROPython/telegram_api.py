@@ -134,6 +134,13 @@ class Telegram:
             files={"photo": (nama, foto)}, timeout=90,
         )
 
+    def kirim_animasi(self, chat_id: int, isi: bytes, caption: str = "", nama: str = "animasi.gif"):
+        return self.panggil(
+            "sendAnimation",
+            {"chat_id": chat_id, "caption": caption[:1000], "parse_mode": "HTML"},
+            files={"animation": (nama, isi, "image/gif")}, timeout=120,
+        )
+
     def kirim_album(self, chat_id: int, daftar_foto: list[tuple[str, bytes]], caption: str = ""):
         """Kirim 2-10 foto sekaligus. Caption ditempel di foto pertama."""
         media, files = [], {}
