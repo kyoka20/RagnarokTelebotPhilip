@@ -112,26 +112,19 @@ def buat_gif(pid: str, profil: dict, catatan_kaki: str = "") -> tuple[bytes, dic
                                 fill=(12, 17, 34), outline=badge_col, width=2)
             rapor._tengah(d, cx, ry0 + 203, badge_txt, f_b, badge_col)
 
-        # Progress bar bawah
+        # Progress bar boost (Awal -> Terbaik, tanpa tulisan Target)
         by0, by1 = 380, 454
         d.rounded_rectangle((28, by0, W - 28, by1), 14, fill=KARTU, outline=GARIS, width=2)
-        if target:
-            rasio = min(1.0, cur_dps / target) if target > 0 else 0.0
-            pct = cur_dps / target * 100
-            capai = cur_dps >= target
-            col_bar = HIJAU if capai else EMAS
-            t_kiri = f"TARGET {umum.fmt(target)}  —  {'TERCAPAI!' if capai else 'PROGRES...'}"
-            d.text((48, by0 + 12), t_kiri, font=rapor._font(18, True), fill=col_bar)
-            t_kanan = f"{pct:.1f}%".replace(".", ",")
-            d.text((W - 48 - d.textlength(t_kanan, font=rapor._font(18, True)), by0 + 12), t_kanan,
-                   font=rapor._font(18, True), fill=col_bar)
-            bx0, bx1 = 48, W - 48
-            d.rounded_rectangle((bx0, by0 + 44, bx1, by0 + 58), 7, fill=(12, 17, 34))
-            fw_bar = max(12, int((bx1 - bx0) * rasio))
-            d.rounded_rectangle((bx0, by0 + 44, bx0 + fw_bar, by0 + 58), 7, fill=col_bar)
-        else:
-            rapor._tengah(d, W // 2, by0 + 24, f"Awal {umum.fmt(awal['dps'])}  →  Terbaik {umum.fmt(terbaik['dps'])}",
-                          rapor._font(22, True), HIJAU if fase == "after" else CYAN)
+        col_bar = HIJAU if fase == "after" else CYAN
+        t_kiri = f"DPS AWAL {umum.fmt(awal['dps'])}   →   DPS TERBAIK {umum.fmt(terbaik['dps'])}"
+        d.text((48, by0 + 12), t_kiri, font=rapor._font(18, True), fill=col_bar)
+        t_kanan = f"{cur_naik:+.1f}%".replace(".", ",") if progress > 0.01 else "START"
+        d.text((W - 48 - d.textlength(t_kanan, font=rapor._font(18, True)), by0 + 12), t_kanan,
+               font=rapor._font(18, True), fill=EMAS if progress > 0.01 else ABU)
+        bx0, bx1 = 48, W - 48
+        d.rounded_rectangle((bx0, by0 + 44, bx1, by0 + 58), 7, fill=(12, 17, 34))
+        fw_bar = max(12, int((bx1 - bx0) * max(0.06, progress)))
+        d.rounded_rectangle((bx0, by0 + 44, bx0 + fw_bar, by0 + 58), 7, fill=col_bar)
 
         return img.convert("P", palette=Image.ADAPTIVE, colors=256)
 
@@ -192,36 +185,26 @@ def buat_story(pid: str, profil: dict, catatan_kaki: str = "") -> tuple[bytes, d
     d.text((54, y), f"SEBELUM  ({awal['waktu']:%d/%m/%Y %H:%M})", font=rapor._font(26, True), fill=ABU)
     img.paste(rapor._foto(pid, awal, W - 108, 430, "BEFORE", ABU), (54, y + 40))
 
-    # Banner Boost Tengah (High Impact)
+    # Banner Boost Tengah (High Impact, tanpa Target)
     y = 770
-    d.rounded_rectangle((54, y, W - 54, y + 320), 24, fill=KARTU, outline=HIJAU if tembus else CYAN, width=3)
-    d.rounded_rectangle((120, y, W - 120, y + 7), 4, fill=EMAS if tembus else CYAN)
+    d.rounded_rectangle((54, y, W - 54, y + 290), 24, fill=KARTU, outline=HIJAU if naik >= 0 else CYAN, width=3)
+    d.rounded_rectangle((120, y, W - 120, y + 7), 4, fill=EMAS if naik >= 0 else CYAN)
 
-    rapor._tengah(d, W // 2, y + 26, f"{umum.fmt(awal['dps'])}   →   {umum.fmt(terbaik['dps'])}",
-                  rapor._font(44, True), PUTIH)
-    rapor._tengah(d, W // 2, y + 92, f"{naik:+.1f}%".replace(".", ","),
-                  rapor._font(92, True), HIJAU if naik >= 0 else MERAH)
-    rapor._tengah(d, W // 2, y + 202, f"Selisih {umum.fmt_selisih(terbaik['dps'] - awal['dps'])} DPS",
-                  rapor._font(28, True), EMAS)
-
-    if target:
-        rasio = min(1.0, terbaik["dps"] / target) if target > 0 else 0.0
-        col_bar = HIJAU if tembus else EMAS
-        kurang_s = umum.fmt(target - terbaik["dps"])
-        t_tgt = f"TARGET {umum.fmt(target)} — {'TERCAPAI!' if tembus else f'kurang {kurang_s}'}"
-        rapor._tengah(d, W // 2, y + 246, t_tgt, rapor._font(22, True), col_bar)
-        bx0, bx1 = 104, W - 104
-        d.rounded_rectangle((bx0, y + 282, bx1, y + 298), 8, fill=(12, 17, 34))
-        d.rounded_rectangle((bx0, y + 282, bx0 + max(16, int((bx1 - bx0) * rasio)), y + 298), 8, fill=col_bar)
+    rapor._tengah(d, W // 2, y + 32, f"{umum.fmt(awal['dps'])}   →   {umum.fmt(terbaik['dps'])}",
+                  rapor._font(46, True), PUTIH)
+    rapor._tengah(d, W // 2, y + 104, f"{naik:+.1f}%".replace(".", ","),
+                  rapor._font(96, True), HIJAU if naik >= 0 else MERAH)
+    rapor._tengah(d, W // 2, y + 220, f"Selisih {umum.fmt_selisih(terbaik['dps'] - awal['dps'])} DPS",
+                  rapor._font(30, True), EMAS)
 
     # Foto AFTER
-    y = 1120
+    y = 1094
     d.text((54, y), f"SESUDAH  ({terbaik['waktu']:%d/%m/%Y %H:%M})", font=rapor._font(26, True), fill=HIJAU)
-    img.paste(rapor._foto(pid, terbaik, W - 108, 430, "AFTER • BEST", HIJAU), (54, y + 40))
+    img.paste(rapor._foto(pid, terbaik, W - 108, 445, "AFTER • BEST", HIJAU), (54, y + 40))
 
     # Mini Kurva Progres
     if len(semua) >= 2:
-        rapor._gambar_kurva(img, (54, 1618, W - 54, 1812), semua, target)
+        rapor._gambar_kurva(img, (54, 1608, W - 54, 1812), semua)
         d = ImageDraw.Draw(img)
 
     # Kaki watermark

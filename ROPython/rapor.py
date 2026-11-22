@@ -100,7 +100,7 @@ def _gambar_kurva(img: Image.Image, box: tuple[int, int, int, int], data: list[d
 
     vals = [r["dps"] for r in data]
     vmin = min(vals) * 0.92
-    vmax = max(max(vals), target or 0) * 1.06
+    vmax = max(vals) * 1.06
     if vmax <= vmin:
         vmax = vmin + 1
 
@@ -118,13 +118,6 @@ def _gambar_kurva(img: Image.Image, box: tuple[int, int, int, int], data: list[d
         d.line((gx0, gy, gx1, gy), fill=(33, 43, 74), width=1)
         lbl = f"{gv / 1e6:.2f}jt" if gv >= 1e6 else f"{gv / 1e3:.0f}k"
         d.text((x0 + 18, gy - 10), lbl, font=f_kecil, fill=ABU)
-
-    # Garis target putus-putus
-    if target and vmin <= target <= vmax:
-        ty = py(target)
-        for sx in range(gx0, gx1, 18):
-            d.line((sx, ty, min(sx + 10, gx1), ty), fill=EMAS, width=2)
-        d.text((gx1 - 155, ty - 24), f"TARGET {umum.fmt(target)}", font=_font(16, True), fill=EMAS)
 
     pts = [(px(i), py(v)) for i, v in enumerate(vals)]
 
@@ -174,7 +167,7 @@ def buat(pid: str, profil: dict, catatan_kaki: str = "") -> tuple[bytes, dict] |
 
     tinggi_foto = 330
     tinggi_grafik = 210 if len(semua) >= 2 else 0
-    H = 158 + 185 + (86 if target else 20) + (tinggi_grafik + 24 if tinggi_grafik else 0) + 52 + tinggi_foto + 96
+    H = 158 + 185 + 16 + (tinggi_grafik + 24 if tinggi_grafik else 0) + 52 + tinggi_foto + 96
     img = Image.new("RGB", (LEBAR, H), BG)
 
     # Header gradasi
@@ -215,34 +208,11 @@ def buat(pid: str, profil: dict, catatan_kaki: str = "") -> tuple[bytes, dict] |
         _tengah(d, cx, y + 54, angka, _font(52, True), warna)
         _tengah(d, cx, y + 122, bawah, _font(20), ABU)
 
-    y += 182
-
-    # Progress bar target
-    if target:
-        rasio = min(1.0, terbaik["dps"] / target) if target > 0 else 0.0
-        pct_t = terbaik["dps"] / target * 100
-        d.rounded_rectangle((40, y, LEBAR - 40, y + 68), 14, fill=KARTU, outline=HIJAU if tembus else GARIS, width=2)
-        if tembus:
-            sel = terbaik["dps"] - target
-            kiri = f"TARGET {umum.fmt(target)}  —  TERCAPAI!" + (f" (+{umum.fmt(sel)})" if sel > 0 else "")
-            col_bar = HIJAU
-        else:
-            kiri = f"TARGET {umum.fmt(target)}  —  kurang {umum.fmt(target - terbaik['dps'])}"
-            col_bar = EMAS
-        d.text((62, y + 10), kiri, font=_font(22, True), fill=col_bar)
-        kanan_t = f"{pct_t:.1f}%".replace(".", ",")
-        d.text((LEBAR - 62 - d.textlength(kanan_t, font=_font(22, True)), y + 10), kanan_t, font=_font(22, True), fill=col_bar)
-        bx0, by0, bx1, by1 = 62, y + 44, LEBAR - 62, y + 56
-        d.rounded_rectangle((bx0, by0, bx1, by1), 6, fill=(14, 19, 38))
-        fill_w = max(12, int((bx1 - bx0) * rasio))
-        d.rounded_rectangle((bx0, by0, bx0 + fill_w, by1), 6, fill=col_bar)
-        y += 88
-    else:
-        y += 14
+    y += 186
 
     # Kurva progres DPS (jika >= 2 test)
     if tinggi_grafik:
-        _gambar_kurva(img, (40, y, LEBAR - 40, y + tinggi_grafik), semua, target)
+        _gambar_kurva(img, (40, y, LEBAR - 40, y + tinggi_grafik), semua)
         d = ImageDraw.Draw(img)
         y += tinggi_grafik + 24
 
