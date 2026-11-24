@@ -2639,13 +2639,22 @@ class Bot:
                 self.simpan()
             self.balas(chat_id, "✅ Token GitHub disimpan di config." if au["token"] else "✅ Token GitHub dihapus.")
             return
+        if cmd == "interval" and len(bag) > 1 and bag[1].isdigit():
+            menit = max(2, int(bag[1]))
+            with self.kunci:
+                au["interval_menit"] = menit
+                au["interval_kustom"] = True
+                self.cfg["auto_update"] = au
+                self.simpan()
+            self.balas(chat_id, f"✅ Interval cek auto-update diatur ke <b>{menit} menit</b>.")
+            return
         if "/" in bag[0]:
             with self.kunci:
                 au["repo"] = bag[0].strip().strip("/")
                 if len(bag) > 1:
                     au["branch"] = bag[1].strip()
                 au.setdefault("branch", "main")
-                au.setdefault("interval_menit", 15)
+                au.setdefault("interval_menit", 2)
                 au["aktif"] = True
                 self.cfg["auto_update"] = au
                 self.simpan()
@@ -2669,11 +2678,15 @@ class Bot:
                 self.balas(chat_id, "⏳ Update lain sedang diproses.")
             return
         try:
-            sha_baru, pesan = autoupdate.cek_commit_terbaru(info["repo"], info["branch"], info["token"])
+            sha_baru, pesan = autoupdate.cek_commit_terbaru(
+                info["repo"], info["branch"], info["token"], paksa=paksa_kabar
+            )
             sha_lama = autoupdate.sha_lokal()
-            if sha_baru == sha_lama:
+            if sha_baru is None or sha_baru == sha_lama:
                 if paksa_kabar and chat_id:
-                    self.balas(chat_id, f"✅ Sudah versi terbaru (<code>{sha_baru[:8]}</code> — {html.escape(pesan)}).")
+                    t_sha = (sha_baru or sha_lama)[:8]
+                    self.balas(chat_id, f"✅ Sudah versi terbaru (<code>{t_sha}</code>"
+                                        + (f" — {html.escape(pesan)}" if pesan else "") + ").")
                 return
             if paksa_kabar and chat_id:
                 self.balas(chat_id, f"⏳ Ditemukan commit baru <code>{sha_baru[:8]}</code> ({html.escape(pesan)}), mengunduh...")
@@ -2768,11 +2781,31 @@ class Bot:
             return
         if cmd == "token":
             tok = bag[1].strip() if len(bag) > 1 else ""
+            hapus = tok.lower() in ("hapus", "clear", "-") or not tok
             with self.kunci:
-                sl["token"] = "" if tok.lower() in ("hapus", "clear", "-") else tok
+                sl["token"] = "" if hapus else tok
+                if not hapus:
+                    sl.setdefault("repo", autoupdate.DEFAULT_SYNC_REPO)
+                    sl.setdefault("branch", "logs")
+                    sl.setdefault("interval_menit", 5)
+                    sl["aktif"] = True
                 self.cfg["sync_log"] = sl
                 self.simpan()
-            self.balas(chat_id, "✅ Token sync_log disimpan." if sl["token"] else "✅ Token sync_log dihapus.")
+            if hapus:
+                self.balas(chat_id, "✅ Token sync_log dihapus.")
+            else:
+                self.balas(chat_id, f"✅ Token disimpan & sync_log AKTIF ke <code>{html.escape(sl['repo'])}</code> "
+                                    f"(branch <code>{html.escape(sl['branch'])}</code>, tiap {sl['interval_menit']} menit).\n"
+                                    "⏳ Mengirim log pertama sekarang...")
+                threading.Thread(target=self._kirim_sync_log, args=(chat_id, True), daemon=True, name="sync-log-now").start()
+            return
+        if cmd == "interval" and len(bag) > 1 and bag[1].isdigit():
+            menit = max(2, int(bag[1]))
+            with self.kunci:
+                sl["interval_menit"] = menit
+                self.cfg["sync_log"] = sl
+                self.simpan()
+            self.balas(chat_id, f"✅ Interval sync_log diatur ke <b>{menit} menit</b>.")
             return
         if "/" in bag[0]:
             with self.kunci:
@@ -2801,7 +2834,7 @@ class Bot:
             return
         try:
             terkirim = autoupdate.kirim_log(
-                info["repo"], info["branch"], info["token"], self._ringkas_profil_telemetry()
+                info["repo"], info["branch"], info["token"], self._ringkas_profil_telemetry(), paksa=paksa_kabar
             )
             if paksa_kabar and chat_id:
                 if terkirim:

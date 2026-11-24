@@ -27,6 +27,12 @@ import umum
 FILE_SHA = umum.FOLDER / "log" / "auto_update_sha.txt"
 DILARANG_EKSTRA = {"4_jalankan_bot.bat", "4b_jalankan_bot_minimize.bat", "jaga_bot.ps1", "jaga_bot_diam.vbs"}
 EKSTENSI_BOLEH = (".py", ".json", ".txt", ".md")
+DEFAULT_SYNC_REPO = "kyoka20/ro-bot-logs"
+
+_ETAG_CACHE: dict[str, str] = {}
+_SYNC_SIG_TERAKHIR: tuple[int, int, str] | None = None
+_REPO_PRIVATE_OK: set[str] = set()
+_BRANCH_OK: set[tuple[str, str]] = set()
 
 
 def _headers(token: str = "") -> dict[str, str]:
@@ -48,11 +54,24 @@ def simpan_sha(sha: str) -> None:
     FILE_SHA.write_text(sha.strip(), encoding="utf-8")
 
 
-def cek_commit_terbaru(repo: str, branch: str = "main", token: str = "") -> tuple[str, str]:
-    """Kembalikan (sha, pesan_commit_baris_pertama) dari GitHub API."""
+def cek_commit_terbaru(repo: str, branch: str = "main", token: str = "", paksa: bool = False) -> tuple[str | None, str]:
+    """Kembalikan (sha, pesan_commit_baris_pertama) dari GitHub API.
+
+    Memakai HTTP ETag (`If-None-Match`): bila tidak ada commit baru, GitHub balas 304 (0 byte,
+    tidak menghabiskan kuota rate-limit) dan fungsi mengembalikan `(None, "")`.
+    """
+    kunci = f"{repo.strip().strip('/')}:{branch.strip() or 'main'}"
     url = f"https://api.github.com/repos/{repo.strip().strip('/')}/commits/{branch.strip() or 'main'}"
-    r = requests.get(url, headers=_headers(token), timeout=30)
+    hdr = _headers(token)
+    if not paksa and kunci in _ETAG_CACHE:
+        hdr["If-None-Match"] = _ETAG_CACHE[kunci]
+    r = requests.get(url, headers=hdr, timeout=20)
+    if r.status_code == 304:
+        return None, ""
     r.raise_for_status()
+    etag = r.headers.get("ETag")
+    if etag:
+        _ETAG_CACHE[kunci] = etag
     d = r.json()
     sha = str(d.get("sha") or "").strip()
     pesan = str((d.get("commit") or {}).get("message") or "").splitlines()[0].strip()
@@ -128,11 +147,17 @@ def unduh_berkas_berubah(repo: str, branch: str, token: str, dilarang_folder: se
 
 def info_config(cfg: dict[str, Any]) -> dict[str, Any]:
     au = cfg.get("auto_update") or {}
+    mentah = au.get("interval_menit")
+    # Default baru 2 menit (aman & ringan karena pakai ETag 304). Nilai lama 15 otomatis turun ke 2 kecuali diset manual.
+    if mentah is None or (int(mentah) == 15 and not au.get("interval_kustom")):
+        interval = 2
+    else:
+        interval = max(2, int(mentah))
     return {
         "repo": str(au.get("repo") or "").strip(),
         "branch": str(au.get("branch") or "main").strip() or "main",
         "token": str(au.get("token") or "").strip(),
-        "interval_menit": max(2, int(au.get("interval_menit") or 15)),
+        "interval_menit": interval,
         "aktif": bool(au.get("aktif", True)),
     }
 
@@ -157,10 +182,10 @@ def info_sync_log(cfg: dict[str, Any]) -> dict[str, Any]:
     sl = cfg.get("sync_log") or {}
     au = cfg.get("auto_update") or {}
     return {
-        "repo": str(sl.get("repo") or au.get("repo") or "").strip(),
+        "repo": str(sl.get("repo") or DEFAULT_SYNC_REPO).strip(),
         "branch": str(sl.get("branch") or "logs").strip() or "logs",
         "token": str(sl.get("token") or au.get("token") or "").strip(),
-        "interval_menit": max(5, int(sl.get("interval_menit") or 30)),
+        "interval_menit": max(2, int(sl.get("interval_menit") or 5)),
         "aktif": bool(sl.get("aktif", False)),
     }
 
@@ -169,12 +194,14 @@ def _cek_repo_private(repo: str, token: str) -> str:
     """Pastikan repo bersifat PRIVATE agar log/data klien tidak bocor ke publik. Kembalikan default_branch."""
     if not token:
         raise ValueError("Token GitHub belum diisi (wajib untuk push log ke repo private).")
-    url = f"https://api.github.com/repos/{repo.strip().strip('/')}"
+    repo_clean = repo.strip().strip("/")
+    url = f"https://api.github.com/repos/{repo_clean}"
     r = requests.get(url, headers=_headers(token), timeout=20)
     r.raise_for_status()
     d = r.json()
     if not d.get("private"):
         raise ValueError(f"Repo {repo} masih PUBLIK! Jadikan Private dulu (atau pakai repo private khusus log) agar data klien aman.")
+    _REPO_PRIVATE_OK.add(repo_clean)
     return str(d.get("default_branch") or "main")
 
 
@@ -227,17 +254,33 @@ def _upload_konten(repo: str, branch: str, token: str, path_repo: str, data: byt
     return True
 
 
-def kirim_log(repo: str, branch: str, token: str, ringkas_profil: dict[str, Any], maks_kb: int = 200) -> list[str]:
-    """Kirim ekor bot.log (maks_kb KB) + ringkasan profil ke branch khusus (default `logs`) di repo PRIVATE."""
+def kirim_log(repo: str, branch: str, token: str, ringkas_profil: dict[str, Any],
+              maks_kb: int = 200, paksa: bool = False) -> list[str]:
+    """Kirim ekor bot.log (maks_kb KB) + ringkasan profil ke branch khusus (default `logs`) di repo PRIVATE.
+
+    Ringan untuk laptop: cek mtime+size bot.log & hash profil dulu; kalau tidak berubah, 0 request HTTP.
+    """
+    global _SYNC_SIG_TERAKHIR
     if branch.strip().lower() in ("main", "master"):
         raise ValueError("Branch sync_log tidak boleh main/master (pakai branch khusus seperti 'logs').")
-    default_branch = _cek_repo_private(repo, token)
-    _pastikan_branch(repo, branch, default_branch, token)
+
+    file_log = umum.FOLDER / "log" / "bot.log"
+    st = file_log.stat() if file_log.exists() else None
+    profil_tanpa_jam = {k: v for k, v in ringkas_profil.items() if k != "diperbarui"}
+    sig_profil = hashlib.sha1(json.dumps(profil_tanpa_jam, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+    sig_baru = (st.st_mtime_ns if st else 0, st.st_size if st else 0, sig_profil)
+    if not paksa and _SYNC_SIG_TERAKHIR == sig_baru:
+        return []  # tidak ada perubahan sejak sync terakhir -> 0 HTTP request
+
+    repo_clean = repo.strip().strip("/")
+    if repo_clean not in _REPO_PRIVATE_OK or (repo_clean, branch) not in _BRANCH_OK:
+        default_branch = _cek_repo_private(repo_clean, token)
+        _pastikan_branch(repo_clean, branch, default_branch, token)
+        _BRANCH_OK.add((repo_clean, branch))
 
     terkirim: list[str] = []
     cap = datetime.now().strftime("%Y-%m-%d %H:%M")
 
-    file_log = umum.FOLDER / "log" / "bot.log"
     if file_log.exists():
         mentah = file_log.read_bytes()
         batas = maks_kb * 1024
@@ -246,13 +289,14 @@ def kirim_log(repo: str, branch: str, token: str, ringkas_profil: dict[str, Any]
             nl = potong.find(b"\n")
             mentah = potong[nl + 1:] if nl != -1 else potong
         teks_log = sensor_rahasia(mentah.decode("utf-8", "replace"))
-        if _upload_konten(repo, branch, token, "telemetry/bot.log", teks_log.encode("utf-8"),
+        if _upload_konten(repo_clean, branch, token, "telemetry/bot.log", teks_log.encode("utf-8"),
                           f"sync log {cap}"):
             terkirim.append("telemetry/bot.log")
 
     data_profil = sensor_rahasia(json.dumps(ringkas_profil, ensure_ascii=False, indent=2)).encode("utf-8")
-    if _upload_konten(repo, branch, token, "telemetry/ringkas_profil.json", data_profil,
+    if _upload_konten(repo_clean, branch, token, "telemetry/ringkas_profil.json", data_profil,
                       f"sync profil {cap}"):
         terkirim.append("telemetry/ringkas_profil.json")
 
+    _SYNC_SIG_TERAKHIR = sig_baru
     return terkirim
