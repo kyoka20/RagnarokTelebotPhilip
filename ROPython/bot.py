@@ -71,7 +71,7 @@ BANTUAN = """<b>Daftar perintah</b>
 /saran oniichan - saran build 1 karakter (DPS, stat terbuang, prioritas stat & batu). Salah ketik tidak apa-apa
 /sim +10% pdmg - simulasi kenaikan DPS & proyeksi target (boleh gabung: /sim +300 atk +15% vs medium)
 /kalibrasi - kalibrasi rumus DPS pakai ML lokal dari data test nyata
-(chat biasa / kirim foto) - langsung ngobrol & tanya racikan ke AI tanpa perlu command (otomatis baca stat karakter aktif)
+/gemini pertanyaan - tanya racikan ke AI (otomatis baca stat karakter aktif; bisa juga kirim foto + caption /gemini)
 /analisis - baca layar game sekarang (equip/kartu/stat/skill) + saran DPS pakai AI Vision
 /gemini_key API_KEY - pasang API key Gemini (pesan otomatis dihapus)
 /batu - saran batu enchant terbaik per slot untuk DPS  |  /batu head
@@ -110,7 +110,7 @@ MENU = [("input", "Isi / ubah data pembeli"), ("daftar", "Semua karakter + DPS t
         ("saran", "Saran build karakter (contoh: /saran oniichan)"),
         ("sim", "Simulasi kenaikan DPS (contoh: /sim +10% pdmg)"),
         ("kalibrasi", "Kalibrasi rumus DPS (ML lokal dari hasil test)"),
-        ("tanya", "Tanya racikan build ke AI (otomatis baca stat aktif)"),
+        ("gemini", "Tanya racikan build ke AI (contoh: /gemini saran kartu)"),
         ("analisis", "Baca layar equip/kartu/stat + saran DPS (AI Vision)"),
         ("batu", "Saran batu enchant per slot untuk DPS"),
         ("record_train", "Mode train: rekam layar game untuk dipelajari"),
@@ -901,7 +901,7 @@ class Bot:
             umum.simpan_config(self.cfg)
             self.mtime_config = self._mtime()
         self.balas(chat_id, "✅ API key Gemini tersimpan (pesan berisi key sudah dihapus dari chat).\n"
-                            "Langsung chat biasa (atau kirim foto layar) tanpa perlu command!")
+                            "Pakai: <code>/gemini pertanyaan</code> atau <code>/analisis</code>.")
 
     def _selesai_loading(self, chat_id: int, msg_id: int | None, teks_html: str) -> None:
         """Ubah pesan loading menjadi jawaban akhir (tanpa meninggalkan pesan sampah)."""
@@ -912,14 +912,17 @@ class Bot:
             self.tg.hapus_pesan(chat_id, msg_id)
         self.balas(chat_id, teks_html)
 
-    def p_tanya(self, chat_id, isi, diam: bool = False):
-        """Chat bebas atau /tanya <pertanyaan> - tanya racikan build ke Gemini dengan konteks karakter aktif."""
+    def p_tanya(self, chat_id, isi, pesan: dict | None = None):
+        """/gemini <pertanyaan> - tanya racikan build ke Gemini dengan konteks karakter aktif."""
+        if pesan and (pesan.get("photo") or (pesan.get("reply_to_message") or {}).get("photo")):
+            self.p_analisis(chat_id, isi, pesan)
+            return
         pertanyaan = isi.strip()
         if not pertanyaan:
-            self.balas(chat_id, "Langsung ketik pertanyaan biasa saja tanpa command, atau contoh:\n"
-                                "• <code>budget tipis, lebih worth ganti kartu atau up batu?</code>\n"
-                                "• <code>kenapa DPS susah naik lagi?</code>\n"
-                                "Bot otomatis menyertakan stat, DPS, dan prioritas karakter aktif.")
+            self.balas(chat_id, "Contoh:\n"
+                                "• <code>/gemini budget tipis, lebih worth ganti kartu atau up batu?</code>\n"
+                                "• <code>/gemini kenapa DPS susah naik lagi?</code>\n"
+                                "Bisa juga kirim foto layar dengan caption <code>/gemini</code>.")
             return
         api_key, model = gemini.ambil_cfg(self.cfg)
         if not api_key:
@@ -1386,29 +1389,20 @@ class Bot:
                 antre = [x for x in self.dok_tunggu.get(chat_id, []) if time.time() - x[0] <= 600]
                 antre.append((time.time(), pesan.get("media_group_id"), pesan["document"]))
                 self.dok_tunggu[chat_id] = antre[-30:]
-        ada_foto = bool(pesan.get("photo"))
-        if chat_id is None or (not teks and not ada_foto):
+        if chat_id is None or not teks:
             return
         if chat_id not in self.chat_ids and chat_id not in self.dev_ids:
             # KEAMANAN: orang lain diabaikan total, tidak dibalas.
             self.log.warning("Pesan dari chat_id tak dikenal %s diabaikan.", chat_id)
             return
         if not teks.startswith("/"):
-            if chat_id in self.isian and teks:
+            if chat_id in self.isian:
                 self.lanjut_isian(chat_id, teks)
             else:
-                self.muat_ulang_jika_berubah()
-                api_key, _ = gemini.ambil_cfg(self.cfg)
-                if api_key:
-                    if ada_foto:
-                        self.p_analisis(chat_id, teks, pesan, diam=True)
-                    else:
-                        self.p_tanya(chat_id, teks, diam=True)
-                elif teks:
-                    # Misalnya bot sempat restart di tengah /input: jangan diam saja.
-                    self.kirim.tambah("balasan", self.tg.kirim_teks, chat_id,
-                                      "ℹ️ Tidak ada /input yang sedang berjalan (mungkin bot sempat restart).\n"
-                                      "Mulai lagi: /input  |  Daftar perintah: /help", None, True)
+                # Misalnya bot sempat restart di tengah /input: jangan diam saja.
+                self.kirim.tambah("balasan", self.tg.kirim_teks, chat_id,
+                                  "ℹ️ Tidak ada /input yang sedang berjalan (mungkin bot sempat restart).\n"
+                                  "Mulai lagi: /input  |  Daftar perintah: /help", None, True)
             return
         if chat_id in self.isian and teks.split()[0].lower() != "/input":
             self.isian.pop(chat_id, None)
@@ -1458,7 +1452,9 @@ class Bot:
             "/saran": self.p_saran, "/advice": self.p_saran,
             "/sim": self.p_sim, "/simulasi": self.p_sim, "/calc": self.p_sim,
             "/kalibrasi": self.p_kalibrasi, "/kal": self.p_kalibrasi,
-            "/tanya": self.p_tanya, "/ai": self.p_tanya, "/gemini": self.p_tanya,
+            "/gemini": lambda c, i: self.p_tanya(c, i, pesan),
+            "/tanya": lambda c, i: self.p_tanya(c, i, pesan),
+            "/ai": lambda c, i: self.p_tanya(c, i, pesan),
             "/analisis": lambda c, i: self.p_analisis(c, i, pesan),
             "/baca_equip": lambda c, i: self.p_analisis(c, i, pesan),
             "/vision": lambda c, i: self.p_analisis(c, i, pesan),
