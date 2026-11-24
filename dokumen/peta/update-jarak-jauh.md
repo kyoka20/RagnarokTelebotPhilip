@@ -1,5 +1,18 @@
 # Update jarak jauh (developer)
 
+## Cara utama sejak 2026-11-24: auto-update dari GitHub
+- Alur: dev edit di PC ini → commit + push ke `main` repo `kyoka20/RagnarokTelebotPhilip` → thread `loop_auto_update` (`bot.py`) di laptop Philip cek tiap 2 menit → ada commit baru → unduh zipball, ambil isi `ROPython/` yang berubah saja → pipeline aman yang sama dengan `/update` (`_terapkan_berkas_update`: cadangan, uji `import bot`, rollback kalau gagal, restart).
+- Ringan: cek pakai ETag → tidak ada commit baru = GitHub balas 304 (0 byte, tak makan kuota). SHA terakhir di `log/auto_update_sha.txt`.
+- Tidak pernah ikut terpasang: `DILARANG_UPDATE` (config.json, data, log, .venv, dll.) + `DILARANG_EKSTRA` (bat/ps1/vbs penjaga). Hanya `.py .json .txt .md`, maks 5 MB/file, sintaks dicek dulu.
+- Perintah dev: `/auto_update` (status), `/auto_update owner/repo [branch]`, `/auto_update token ...`, `/auto_update cek` atau `/tarik_update` (tarik sekarang), `on/off`. Config: `auto_update` di `config.json` (repo, branch, token, interval_menit, aktif).
+- Push = langsung sampai ke bot Philip. Jangan push kode yang belum dicek (`python -c "import bot"` di PC ini dulu).
+- `/sync_log`: tiap 5 menit kirim ekor `bot.log` (≤200 KB) + ringkasan profil ke repo PRIVATE `kyoka20/ro-bot-logs` branch `logs` (`telemetry/`). Token disensor otomatis; menolak repo publik & branch main/master. Tidak berubah = 0 request. Baca log Philip dari sana (tak perlu minta `/log`).
+- Perbaikan 24/11: `database/` & `database_ikon/` tidak ikut auto-update (`FOLDER_DIURUS_LAPTOP`; laptop unduh sendiri dari roworlddb, versi GitHub bisa lebih tua). Gagal karena internet → `lupakan_etag()` supaya dicoba lagi 2 menit kemudian (dulu terlewat sampai ada commit baru). Kode rusak (ValueError) / uji `import bot` gagal → kabar ke dev sekali. Saat Philip sedang `/input` (<30 menit) auto-update ditunda (tidak restart di tengah isian). `/sync_log` dulu tidak bisa dipanggil (tidak ada di daftar perintah dev) → sudah.
+- Hemat CPU: `cek_nama_karakter` (OCR tengah layar tiap 6 dtk) dilewati saat AFK.
+- Kode: `ROPython/autoupdate.py` (cek commit, unduh, sync log) + `bot.py` (`p_auto_update`, `_cek_auto_update`, `loop_auto_update`, `p_sync_log`, `loop_sync_log`).
+
+## /update manual (cadangan, dibuat 2026-11-22)
+
 Dibuat 2026-11-22. Semua kode di `ROPython/bot.py`, bagian `# developer (/update dari jauh)`.
 
 - Developer = `DEV_DEFAULT` (konstanta atas `bot.py`) atau `telegram.chat_id_developer` di config.

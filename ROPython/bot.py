@@ -1154,6 +1154,8 @@ class Bot:
         (supaya tidak pindah gara-gara pemain lain lewat)."""
         if time.time() - self.nama_cek_terakhir < 6:
             return
+        if self.afk_mulai is not None:
+            return  # AFK (game tidak disentuh): ganti karakter mustahil -> hemat CPU, tidak OCR tiap 6 detik
         self.nama_cek_terakhir = time.time()
         with self.kunci:
             aktif = self.pid
@@ -1426,7 +1428,7 @@ class Bot:
         m = re.fullmatch(r"(/[a-z_]+?)(\d+)", perintah)  # salah ketik spasi: "/lihat24" = "/lihat 24"
         if m:
             perintah, isi = m.group(1), f"{m.group(2)} {isi}".strip()
-        if perintah in ("/update", "/auto_update", "/tarik_update", "/siar_tutor", "/dev_mode", "/devmode", "/log", "/restart", "/dev", "/data_latih", "/pemakaian"):
+        if perintah in ("/update", "/auto_update", "/tarik_update", "/sync_log", "/siar_tutor","/dev_mode", "/devmode", "/log", "/restart", "/dev", "/data_latih", "/pemakaian"):
             if chat_id not in self.dev_ids:
                 self.balas(chat_id, "Perintah ini khusus developer.")
                 return
@@ -2730,6 +2732,8 @@ class Bot:
             return
         if not paksa_kabar and not info["aktif"]:
             return
+        if not paksa_kabar and any(time.time() - st.get("waktu", 0) <= 30 * 60 for st in list(self.isian.values())):
+            return  # Philip sedang mengisi /input: jangan restart di tengah jalan, coba lagi putaran berikutnya
         if not self.kunci_update.acquire(blocking=False):
             if paksa_kabar and chat_id:
                 self.balas(chat_id, "⏳ Update lain sedang diproses.")
@@ -2755,12 +2759,17 @@ class Bot:
                     self.balas(chat_id, f"✅ Commit <code>{sha_baru[:8]}</code> tidak mengubah file bot (SHA dicatat).")
                 return
             sumber = f"GitHub {info['repo']}@{sha_baru[:8]} ({pesan})"
-            self._terapkan_berkas_update(chat_id, berkas, dilewati, sumber,
+            # Update otomatis (tanpa chat_id): kabar gagal/berhasil tetap ke developer, jangan diam-diam.
+            self._terapkan_berkas_update(chat_id or next(iter(self.dev_ids), None), berkas, dilewati, sumber,
                                          setelah_ok=lambda: autoupdate.simpan_sha(sha_baru))
         except Exception as e:
+            kode_rusak = isinstance(e, ValueError)  # sintaks/JSON di GitHub salah -> percuma diulang sampai ada commit baru
+            if not kode_rusak:
+                autoupdate.lupakan_etag()  # internet putus dll.: commit yang sama dicoba lagi 2 menit kemudian
             self.log.warning("Auto-update gagal: %s", e)
-            if paksa_kabar and chat_id:
-                self.balas(chat_id, f"❌ Auto-update gagal: {html.escape(str(e))}")
+            tujuan = chat_id if paksa_kabar else (next(iter(self.dev_ids), None) if kode_rusak else None)
+            if tujuan:  # kode rusak -> dev perlu tahu (sekali); internet putus -> diam
+                self.balas(tujuan, f"❌ Auto-update gagal: {html.escape(str(e))}")
         finally:
             self.kunci_update.release()
 

@@ -26,6 +26,9 @@ import umum
 
 FILE_SHA = umum.FOLDER / "log" / "auto_update_sha.txt"
 DILARANG_EKSTRA = {"4_jalankan_bot.bat", "4b_jalankan_bot_minimize.bat", "jaga_bot.ps1", "jaga_bot_diam.vbs"}
+# `database/` & `database_ikon/` diunduh sendiri oleh bot di laptop (datagame.perbarui, tiap hari).
+# Versi di GitHub bisa lebih tua -> jangan sampai menimpa database yang lebih baru di laptop.
+FOLDER_DIURUS_LAPTOP = {"database", "database_ikon"}
 EKSTENSI_BOLEH = (".py", ".json", ".txt", ".md")
 DEFAULT_SYNC_REPO = "kyoka20/ro-bot-logs"
 
@@ -80,6 +83,12 @@ def cek_commit_terbaru(repo: str, branch: str = "main", token: str = "", paksa: 
     return sha, pesan
 
 
+def lupakan_etag() -> None:
+    """Dipanggil kalau cek/unduh gagal di tengah jalan: cek berikutnya harus menarik ulang,
+    bukan dapat 304 lalu mengira sudah terbaru (update bisa terlewat sampai ada commit lain)."""
+    _ETAG_CACHE.clear()
+
+
 def unduh_berkas_berubah(repo: str, branch: str, token: str, dilarang_folder: set[str]) -> tuple[dict[str, bytes], list[str]]:
     """Unduh zipball branch GitHub -> ({path_relatif: bytes} yang berubah saja, daftar dilewati)."""
     url = f"https://api.github.com/repos/{repo.strip().strip('/')}/zipball/{branch.strip() or 'main'}"
@@ -110,7 +119,8 @@ def unduh_berkas_berubah(repo: str, branch: str, token: str, dilarang_folder: se
         bagian = [b for b in p.split("/") if b]
         if not bagian or any(b in ("..", ".") for b in bagian):
             continue
-        if bagian[0].lower() in dilarang_folder or bagian[0].startswith("."):
+        if (bagian[0].lower() in dilarang_folder or bagian[0].lower() in FOLDER_DIURUS_LAPTOP
+                or bagian[0].startswith(".")):
             continue
         if p.lower() in DILARANG_EKSTRA or not p.lower().endswith(EKSTENSI_BOLEH):
             continue
