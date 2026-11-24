@@ -521,14 +521,15 @@ class Bot:
 
         tercapai_dulu = self.target_tercapai.get(pid)
         if tercapai_dulu is None:
-            tercapai_dulu = dps_lama is not None and dps_lama >= target
-        tercapai = dps >= target
+            tercapai_dulu = bool(target and dps_lama is not None and dps_lama >= target)
+        tercapai = bool(target and dps >= target)
         self.target_tercapai[pid] = tercapai
 
         self.keadaan = "hasil baru terbaca"
         self.acuan_tanpa_hasil, self.sudah_warn_tanpa_hasil = time.time(), False
 
-        tembus = tercapai and not tercapai_dulu
+        # Target baru dianggap "tembus" kalau memang ada hasil sebelumnya (bukan test pertama yang DPS awalnya sudah >= target).
+        tembus = bool(dps_lama is not None and tercapai and not tercapai_dulu)
         kirim = self.cfg.get("mode", "perubahan") != "target" or tembus
         if dps_lama is None:
             judul, banding = "🔔 <b>HASIL DPS PERTAMA</b>", "↔️ Hasil pertama di sesi ini (jadi DPS awal)"
@@ -1427,6 +1428,7 @@ class Bot:
             {"/update": lambda c, i: self.p_update(c, i, pesan),
              "/auto_update": self.p_auto_update,
              "/tarik_update": lambda c, i: self.p_auto_update(c, "cek"),
+             "/sync_log": self.p_sync_log,
              "/siar_tutor": self.p_siar_tutor,
              "/dev_mode": self.p_dev_mode,
              "/devmode": self.p_dev_mode, "/log": self.p_log, "/restart": self.p_restart,
@@ -1622,6 +1624,9 @@ class Bot:
         if not pilih:
             return
         pid, p = pilih[0], pilih[1]
+        if len(catatan.baca_ok(pid)) < 2:
+            self.balas(chat_id, f"<b>{self.nama_akun(p)}</b> butuh minimal 2 hasil test untuk membuat rapor Sebelum vs Sesudah.")
+            return
         if not self.kirim_rapor(pid, p, "Rapor - tinggal teruskan gambar ini ke pembeli", [chat_id]):
             self.balas(chat_id, f"<b>{self.nama_akun(p)}</b> belum punya hasil DPS tersimpan (atau rapor gagal dibuat, cek log).")
 
@@ -1667,6 +1672,9 @@ class Bot:
         if not pilih:
             return
         pid, p = pilih[0], pilih[1]
+        if len(catatan.baca_ok(pid)) < 2:
+            self.balas(chat_id, f"<b>{self.nama_akun(p)}</b> butuh minimal 2 hasil test untuk membuat animasi Sebelum vs Sesudah.")
+            return
         self.balas(chat_id, f"🎬 Merender animasi <b>{self.nama_akun(p)}</b>...")
         try:
             hasil = visual.buat_gif(pid, p, str(self.cfg.get("rapor_catatan_kaki") or ""))
@@ -1688,6 +1696,9 @@ class Bot:
         if not pilih:
             return
         pid, p = pilih[0], pilih[1]
+        if len(catatan.baca_ok(pid)) < 2:
+            self.balas(chat_id, f"<b>{self.nama_akun(p)}</b> butuh minimal 2 hasil test untuk membuat poster Sebelum vs Sesudah.")
+            return
         try:
             hasil = visual.buat_story(pid, p, str(self.cfg.get("rapor_catatan_kaki") or ""))
         except Exception as e:
@@ -2694,6 +2705,128 @@ class Bot:
             menit = autoupdate.info_config(self.cfg)["interval_menit"]
             self.berhenti.wait(menit * 60)
 
+    def _ringkas_profil_telemetry(self) -> dict:
+        """Ringkasan profil + riwayat singkat (tanpa token/rahasia) untuk debug jarak jauh."""
+        with self.kunci:
+            aktif = self.pid
+            profil_map = copy.deepcopy(self.cfg.get("profil") or {})
+        daftar = []
+        for pid, p in profil_map.items():
+            ok = catatan.baca_ok(pid)
+            daftar.append({
+                "pid": pid,
+                "aktif": pid == aktif,
+                "nick": str(p.get("nick") or p.get("nama") or ""),
+                "id_game": str(p.get("id_game") or ""),
+                "job": str(p.get("job") or ""),
+                "target": int(p.get("target") or 0),
+                "jumlah_test": len(ok),
+                "dps_awal": ok[0]["dps"] if ok else None,
+                "waktu_awal": ok[0]["waktu"].strftime(catatan.FORMAT_WAKTU) if ok else None,
+                "dps_terbaik": max((r["dps"] for r in ok), default=None),
+                "dps_terakhir": ok[-1]["dps"] if ok else None,
+                "waktu_terakhir": ok[-1]["waktu"].strftime(catatan.FORMAT_WAKTU) if ok else None,
+            })
+        return {
+            "diperbarui": datetime.now().strftime(catatan.FORMAT_WAKTU),
+            "profil_aktif": aktif,
+            "keadaan": self.keadaan,
+            "jumlah_profil": len(daftar),
+            "profil": daftar,
+        }
+
+    def p_sync_log(self, chat_id, isi: str) -> None:
+        """Kelola sinkronisasi log + ringkasan profil ke branch khusus (`logs`) di repo GitHub PRIVATE."""
+        isi = isi.strip()
+        sl = dict(self.cfg.get("sync_log") or {})
+        if not isi:
+            info = autoupdate.info_sync_log(self.cfg)
+            self.balas(chat_id,
+                       "📤 <b>Sync Log ke GitHub</b>\n"
+                       f"• Status: <b>{'AKTIF' if info['aktif'] and info['repo'] and info['token'] else 'MATI'}</b>\n"
+                       f"• Repo: <code>{html.escape(info['repo'] or '(belum diatur)')}</code> "
+                       f"(branch: <code>{html.escape(info['branch'])}</code>)\n"
+                       f"• Token: {'✅ terpasang' if info['token'] else '❌ belum ada (wajib repo private)'}\n"
+                       f"• Interval: tiap {info['interval_menit']} menit\n\n"
+                       "Perintah:\n"
+                       "• <code>/sync_log owner/repo [branch]</code>\n"
+                       "• <code>/sync_log token ghp_...</code>\n"
+                       "• <code>/sync_log now</code> (kirim sekarang)\n"
+                       "• <code>/sync_log on</code> / <code>off</code>")
+            return
+        bag = isi.split()
+        cmd = bag[0].lower()
+        if cmd in ("now", "kirim", "cek", "push"):
+            threading.Thread(target=self._kirim_sync_log, args=(chat_id, True), daemon=True, name="sync-log-now").start()
+            return
+        if cmd in ("on", "off"):
+            with self.kunci:
+                sl["aktif"] = (cmd == "on")
+                self.cfg["sync_log"] = sl
+                self.simpan()
+            self.balas(chat_id, f"✅ Sync log {'diaktifkan' if sl['aktif'] else 'dimatikan'}.")
+            return
+        if cmd == "token":
+            tok = bag[1].strip() if len(bag) > 1 else ""
+            with self.kunci:
+                sl["token"] = "" if tok.lower() in ("hapus", "clear", "-") else tok
+                self.cfg["sync_log"] = sl
+                self.simpan()
+            self.balas(chat_id, "✅ Token sync_log disimpan." if sl["token"] else "✅ Token sync_log dihapus.")
+            return
+        if "/" in bag[0]:
+            with self.kunci:
+                sl["repo"] = bag[0].strip().strip("/")
+                if len(bag) > 1:
+                    sl["branch"] = bag[1].strip()
+                sl.setdefault("branch", "logs")
+                sl.setdefault("interval_menit", 30)
+                sl["aktif"] = True
+                self.cfg["sync_log"] = sl
+                self.simpan()
+            self.balas(chat_id, f"✅ Repo sync_log diatur ke <code>{html.escape(sl['repo'])}</code> "
+                                f"(branch <code>{html.escape(sl['branch'])}</code>) dan AKTIF.\n"
+                                "Pastikan repo bersifat <b>Private</b> dan token sudah dipasang, lalu ketik <code>/sync_log now</code>.")
+            return
+        self.balas(chat_id, "Format: <code>/sync_log owner/repo [branch]</code>, "
+                            "<code>/sync_log token ...</code>, <code>/sync_log now</code>, atau <code>on/off</code>.")
+
+    def _kirim_sync_log(self, chat_id=None, paksa_kabar: bool = False) -> None:
+        info = autoupdate.info_sync_log(self.cfg)
+        if not info["repo"]:
+            if paksa_kabar and chat_id:
+                self.balas(chat_id, "⚠️ Repo sync_log belum diatur. Ketik <code>/sync_log owner/repo</code> dulu.")
+            return
+        if not paksa_kabar and (not info["aktif"] or not info["token"]):
+            return
+        try:
+            terkirim = autoupdate.kirim_log(
+                info["repo"], info["branch"], info["token"], self._ringkas_profil_telemetry()
+            )
+            if paksa_kabar and chat_id:
+                if terkirim:
+                    self.balas(chat_id, f"✅ Log berhasil dikirim ke <code>{html.escape(info['repo'])}</code> "
+                                        f"(branch <code>{html.escape(info['branch'])}</code>):\n• "
+                                        + "\n• ".join(f"<code>{html.escape(f)}</code>" for f in terkirim))
+                else:
+                    self.balas(chat_id, f"✅ Log di <code>{html.escape(info['repo'])}</code> "
+                                        f"(branch <code>{html.escape(info['branch'])}</code>) sudah sama (tidak ada perubahan).")
+        except Exception as e:
+            self.log.warning("Sync log gagal: %s", e)
+            if paksa_kabar and chat_id:
+                self.balas(chat_id, f"❌ Sync log gagal: {html.escape(str(e))}")
+
+    def loop_sync_log(self) -> None:
+        """Kirim ekor bot.log + ringkasan profil ke branch khusus di repo GitHub PRIVATE secara berkala."""
+        time.sleep(90)
+        while not self.berhenti.is_set():
+            try:
+                self._kirim_sync_log(chat_id=None, paksa_kabar=False)
+            except Exception:
+                self.log.exception("Error di loop sync_log")
+            menit = autoupdate.info_sync_log(self.cfg)["interval_menit"]
+            self.berhenti.wait(menit * 60)
+
     def _update_batal(self, chat_id):
         folder = umum.FOLDER / "cadangan_update"
         calon = []
@@ -2729,6 +2862,7 @@ class Bot:
         threading.Thread(target=self.loop_database, daemon=True, name="database").start()
         threading.Thread(target=self.loop_harian, daemon=True, name="harian").start()
         threading.Thread(target=self.loop_auto_update, daemon=True, name="auto-update").start()
+        threading.Thread(target=self.loop_sync_log, daemon=True, name="sync-log").start()
         catatan.sesi_mulai(self.pid)
         # Menu "/" di Telegram = hanya perintah yang dipakai (yang lama ikut hilang dari menu).
         self.kirim.tambah("menu perintah", self.tg.panggil, "setMyCommands",

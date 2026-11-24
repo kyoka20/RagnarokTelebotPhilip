@@ -10,9 +10,13 @@ Alur aman:
 """
 from __future__ import annotations
 
+import base64
+import hashlib
 import io
 import json
+import re
 import zipfile
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -131,3 +135,124 @@ def info_config(cfg: dict[str, Any]) -> dict[str, Any]:
         "interval_menit": max(2, int(au.get("interval_menit") or 15)),
         "aktif": bool(au.get("aktif", True)),
     }
+
+
+# ---------------------------------------------------------------- Sync Log ke GitHub (branch khusus `logs`, wajib repo PRIVATE)
+
+_POLA_RAHASIA = [
+    (re.compile(r"\b\d{8,11}:[A-Za-z0-9_-]{30,}\b"), "[TOKEN_TG_DISENSOR]"),
+    (re.compile(r"\b(?:ghp|gho|ghu|ghs|github_pat)_[A-Za-z0-9_]{16,}\b"), "[TOKEN_GH_DISENSOR]"),
+    (re.compile(r"\bAIza[A-Za-z0-9_-]{20,}\b"), "[APIKEY_DISENSOR]"),
+]
+
+
+def sensor_rahasia(teks: str) -> str:
+    """Pastikan tidak ada token/API key yang ikut terkirim ke log GitHub."""
+    for pola, ganti in _POLA_RAHASIA:
+        teks = pola.sub(ganti, teks)
+    return teks
+
+
+def info_sync_log(cfg: dict[str, Any]) -> dict[str, Any]:
+    sl = cfg.get("sync_log") or {}
+    au = cfg.get("auto_update") or {}
+    return {
+        "repo": str(sl.get("repo") or au.get("repo") or "").strip(),
+        "branch": str(sl.get("branch") or "logs").strip() or "logs",
+        "token": str(sl.get("token") or au.get("token") or "").strip(),
+        "interval_menit": max(5, int(sl.get("interval_menit") or 30)),
+        "aktif": bool(sl.get("aktif", False)),
+    }
+
+
+def _cek_repo_private(repo: str, token: str) -> str:
+    """Pastikan repo bersifat PRIVATE agar log/data klien tidak bocor ke publik. Kembalikan default_branch."""
+    if not token:
+        raise ValueError("Token GitHub belum diisi (wajib untuk push log ke repo private).")
+    url = f"https://api.github.com/repos/{repo.strip().strip('/')}"
+    r = requests.get(url, headers=_headers(token), timeout=20)
+    r.raise_for_status()
+    d = r.json()
+    if not d.get("private"):
+        raise ValueError(f"Repo {repo} masih PUBLIK! Jadikan Private dulu (atau pakai repo private khusus log) agar data klien aman.")
+    return str(d.get("default_branch") or "main")
+
+
+def _pastikan_branch(repo: str, branch: str, default_branch: str, token: str) -> None:
+    """Buat branch `branch` (mis. `logs`) dari default_branch bila belum ada di GitHub."""
+    repo_clean = repo.strip().strip("/")
+    url_ref = f"https://api.github.com/repos/{repo_clean}/git/ref/heads/{branch}"
+    r = requests.get(url_ref, headers=_headers(token), timeout=20)
+    if r.status_code == 200:
+        return
+    if r.status_code != 404:
+        r.raise_for_status()
+    r_base = requests.get(f"https://api.github.com/repos/{repo_clean}/git/ref/heads/{default_branch}",
+                          headers=_headers(token), timeout=20)
+    r_base.raise_for_status()
+    sha_base = r_base.json()["object"]["sha"]
+    r_new = requests.post(f"https://api.github.com/repos/{repo_clean}/git/refs",
+                          headers=_headers(token),
+                          json={"ref": f"refs/heads/{branch}", "sha": sha_base},
+                          timeout=20)
+    if r_new.status_code not in (200, 201, 422):
+        r_new.raise_for_status()
+
+
+def _git_blob_sha(data: bytes) -> str:
+    return hashlib.sha1(f"blob {len(data)}\0".encode("ascii") + data).hexdigest()
+
+
+def _upload_konten(repo: str, branch: str, token: str, path_repo: str, data: bytes, pesan: str) -> bool:
+    """Upload/update 1 file lewat GitHub Contents API. Return False bila isi sama persis (skip)."""
+    repo_clean = repo.strip().strip("/")
+    url = f"https://api.github.com/repos/{repo_clean}/contents/{path_repo.lstrip('/')}"
+    r = requests.get(url, headers=_headers(token), params={"ref": branch}, timeout=20)
+    sha_lama = None
+    if r.status_code == 200:
+        sha_lama = r.json().get("sha")
+        if sha_lama == _git_blob_sha(data):
+            return False
+    elif r.status_code != 404:
+        r.raise_for_status()
+    payload: dict[str, Any] = {
+        "message": pesan,
+        "content": base64.b64encode(data).decode("ascii"),
+        "branch": branch,
+    }
+    if sha_lama:
+        payload["sha"] = sha_lama
+    r_put = requests.put(url, headers=_headers(token), json=payload, timeout=30)
+    r_put.raise_for_status()
+    return True
+
+
+def kirim_log(repo: str, branch: str, token: str, ringkas_profil: dict[str, Any], maks_kb: int = 200) -> list[str]:
+    """Kirim ekor bot.log (maks_kb KB) + ringkasan profil ke branch khusus (default `logs`) di repo PRIVATE."""
+    if branch.strip().lower() in ("main", "master"):
+        raise ValueError("Branch sync_log tidak boleh main/master (pakai branch khusus seperti 'logs').")
+    default_branch = _cek_repo_private(repo, token)
+    _pastikan_branch(repo, branch, default_branch, token)
+
+    terkirim: list[str] = []
+    cap = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    file_log = umum.FOLDER / "log" / "bot.log"
+    if file_log.exists():
+        mentah = file_log.read_bytes()
+        batas = maks_kb * 1024
+        if len(mentah) > batas:
+            potong = mentah[-batas:]
+            nl = potong.find(b"\n")
+            mentah = potong[nl + 1:] if nl != -1 else potong
+        teks_log = sensor_rahasia(mentah.decode("utf-8", "replace"))
+        if _upload_konten(repo, branch, token, "telemetry/bot.log", teks_log.encode("utf-8"),
+                          f"sync log {cap}"):
+            terkirim.append("telemetry/bot.log")
+
+    data_profil = sensor_rahasia(json.dumps(ringkas_profil, ensure_ascii=False, indent=2)).encode("utf-8")
+    if _upload_konten(repo, branch, token, "telemetry/ringkas_profil.json", data_profil,
+                      f"sync profil {cap}"):
+        terkirim.append("telemetry/ringkas_profil.json")
+
+    return terkirim

@@ -37,16 +37,14 @@ def _ease_out(t: float) -> float:
 def buat_gif(pid: str, profil: dict, catatan_kaki: str = "") -> tuple[bytes, dict] | None:
     """Animasi GIF ringan (~4.5 detik) transisi BEFORE -> counter roll-up -> AFTER."""
     semua = catatan.baca_ok(pid)
-    if not semua:
+    if len(semua) < 2:
         return None
     awal = semua[0]
     terbaik = max(semua, key=lambda x: x["dps"])
-    target = int(profil.get("target") or 0)
     naik = (terbaik["dps"] - awal["dps"]) / awal["dps"] * 100 if awal["dps"] else 0.0
-    tembus = bool(target and terbaik["dps"] >= target)
     nick = str(profil.get("nick") or profil.get("nama") or pid)
     job = str(profil.get("job") or "")
-    badge_txt, badge_col = rapor._rank_badge(naik, tembus)
+    badge_txt, badge_col = rapor._rank_badge(naik)
 
     W, H = 900, 520
     fw, fh = 410, 240
@@ -57,7 +55,7 @@ def buat_gif(pid: str, profil: dict, catatan_kaki: str = "") -> tuple[bytes, dic
     dasar = Image.new("RGB", (W, H), BG)
     rapor._gradasi_v(dasar, 0, 0, W, 94, (26, 36, 74), (14, 20, 42))
     dd = ImageDraw.Draw(dasar)
-    dd.rectangle((0, 91, W, 94), fill=EMAS if tembus else CYAN)
+    dd.rectangle((0, 91, W, 94), fill=EMAS if naik >= 50 else (HIJAU if naik > 0 else CYAN))
     dd.text((28, 14), "PROGRES BUILD DPS", font=rapor._font(16, True), fill=EMAS)
     dd.text((28, 36), nick + (f"  •  {job}" if job else ""), font=rapor._font(34, True), fill=PUTIH)
     # Kaki
@@ -88,7 +86,7 @@ def buat_gif(pid: str, profil: dict, catatan_kaki: str = "") -> tuple[bytes, dic
 
         # Kanan: panel angka animasi
         rx0, ry0, rx1, ry1 = 460, 118, W - 28, 358
-        d.rounded_rectangle((rx0, ry0, rx1, ry1), 16, fill=KARTU, outline=HIJAU if fase == "after" and tembus else GARIS, width=2)
+        d.rounded_rectangle((rx0, ry0, rx1, ry1), 16, fill=KARTU, outline=HIJAU if fase == "after" and naik > 0 else GARIS, width=2)
         cx = (rx0 + rx1) // 2
 
         lbl_atas = "DPS AWAL" if fase == "before" else ("DPS TERBAIK" if fase == "after" else "BOOSTING DPS...")
@@ -152,22 +150,20 @@ def buat_gif(pid: str, profil: dict, catatan_kaki: str = "") -> tuple[bytes, dic
 def buat_story(pid: str, profil: dict, catatan_kaki: str = "") -> tuple[bytes, dict] | None:
     """Poster vertikal 1080x1920 (9:16) bergaya esports untuk WA Status / IG Story / TikTok."""
     semua = catatan.baca_ok(pid)
-    if not semua:
+    if len(semua) < 2:
         return None
     awal = semua[0]
     terbaik = max(semua, key=lambda x: x["dps"])
-    target = int(profil.get("target") or 0)
     naik = (terbaik["dps"] - awal["dps"]) / awal["dps"] * 100 if awal["dps"] else 0.0
-    tembus = bool(target and terbaik["dps"] >= target)
     nick = str(profil.get("nick") or profil.get("nama") or pid)
     job = str(profil.get("job") or "")
-    badge_txt, badge_col = rapor._rank_badge(naik, tembus)
+    badge_txt, badge_col = rapor._rank_badge(naik)
 
     W, H = 1080, 1920
     img = Image.new("RGB", (W, H), BG)
     rapor._gradasi_v(img, 0, 0, W, 240, (30, 42, 86), (13, 19, 38))
     d = ImageDraw.Draw(img)
-    d.rectangle((0, 234, W, 240), fill=EMAS if tembus else CYAN)
+    d.rectangle((0, 234, W, 240), fill=EMAS if naik >= 50 else (HIJAU if naik > 0 else CYAN))
 
     # Header
     rapor._tengah(d, W // 2, 34, "BEFORE  →  AFTER  BUILD DPS", rapor._font(26, True), EMAS)

@@ -53,15 +53,17 @@ def _gradasi_v(img: Image.Image, x0: int, y0: int, x1: int, y1: int, c1: tuple, 
         d.line((x0, y0 + dy, x1, y0 + dy), fill=c)
 
 
-def _rank_badge(naik: float, tembus: bool) -> tuple[str, tuple]:
+def _rank_badge(naik: float, tembus: bool = False) -> tuple[str, tuple]:
     if naik >= 100:
         return "RANK S+  •  GODLIKE BOOST", EMAS
     if naik >= 50:
         return "RANK S  •  ELITE BUILD", UNGU
-    if naik >= 25 or tembus:
+    if naik >= 25:
         return "RANK A+  •  PRO UPGRADE", HIJAU
     if naik >= 10:
         return "RANK A  •  SOLID GAIN", CYAN
+    if naik > 0:
+        return "BUILD PROGRESS", CYAN
     return "BUILD REPORT", ABU
 
 
@@ -157,13 +159,12 @@ def buat(pid: str, profil: dict, catatan_kaki: str = "") -> tuple[bytes, dict] |
     """Rapor premium: gradient header, rank badge, 3 kartu angka, progress bar target,
     grafik kurva tren DPS, dan foto SEBELUM vs SESUDAH."""
     semua = catatan.baca_ok(pid)
-    if not semua:
+    if len(semua) < 2:
         return None
     awal = semua[0]
     terbaik = max(semua, key=lambda x: x["dps"])
     target = int(profil.get("target") or 0)
     naik = (terbaik["dps"] - awal["dps"]) / awal["dps"] * 100 if awal["dps"] else 0.0
-    tembus = bool(target and terbaik["dps"] >= target)
 
     tinggi_foto = 330
     tinggi_grafik = 210 if len(semua) >= 2 else 0
@@ -173,10 +174,10 @@ def buat(pid: str, profil: dict, catatan_kaki: str = "") -> tuple[bytes, dict] |
     # Header gradasi
     _gradasi_v(img, 0, 0, LEBAR, 148, (24, 34, 68), (15, 21, 44))
     d = ImageDraw.Draw(img)
-    d.rectangle((0, 144, LEBAR, 148), fill=EMAS if tembus else CYAN)
+    d.rectangle((0, 144, LEBAR, 148), fill=EMAS if naik >= 50 else (HIJAU if naik > 0 else CYAN))
 
     # Badge rank di kanan atas
-    badge_txt, badge_col = _rank_badge(naik, tembus)
+    badge_txt, badge_col = _rank_badge(naik)
     f_badge = _font(20, True)
     bw = int(d.textlength(badge_txt, font=f_badge)) + 34
     d.rounded_rectangle((LEBAR - 40 - bw, 22, LEBAR - 40, 62), 20, fill=(14, 19, 38), outline=badge_col, width=2)
