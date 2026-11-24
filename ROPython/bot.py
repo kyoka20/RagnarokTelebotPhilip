@@ -373,29 +373,34 @@ class Bot:
 
     def cocokkan_rekor(self, pid: str, profil: dict, hasil: ocr.HasilBaca) -> tuple[str, dict, str]:
         """Layar hasil tidak menampilkan nama/ID karakter. Tapi angka 'Highest Solo DMG Record'
-        milik satu karakter. Kalau BUKAN rekor baru (Total DMG < Rekor), angka itu harus sama dengan
-        rekor yang tercatat di test terakhir karakter tsb. Jadi kalau sama persis dengan rekor
-        karakter LAIN -> hasil ini milik karakter itu, bot pindah otomatis.
+        milik satu karakter dan TIDAK PERNAH bisa turun.
+        1. Kalau BUKAN rekor baru (Total DMG < Rekor): cocokkan dengan rekor karakter lain -> pindah otomatis.
+        2. Kalau Rekor di layar LEBIH RENDAH dari rekor terakhir karakter aktif -> pasti karakter lain! Beri peringatan keras.
         Hasil: (pid, profil, teks peringatan untuk laporan)."""
         r = hasil.rekor
-        if not r or hasil.total is None or hasil.total >= r:
-            return pid, profil, ""  # rekor baru / tidak terbaca -> tidak bisa dicocokkan
+        if not r:
+            return pid, profil, ""
         with self.kunci:
-            if self._rekor_terakhir(pid) == r:
-                return pid, profil, ""
-            cocok = [k for k in self.cfg["profil"] if k != pid and self._rekor_terakhir(k) == r]
-            if len(cocok) == 1:
-                lama = self.nama_akun(profil)
-                self._aktifkan_profil(cocok[0])
-                pid, profil = cocok[0], self.cfg["profil"][cocok[0]]
-                self.log.info("Rekor %s cocok dengan profil %s -> pindah otomatis dari %s",
-                              r, pid, lama)
-                return pid, profil, (f"🔄 Otomatis pindah dari <b>{lama}</b>: angka Rekor di layar "
-                                     f"sama dengan rekor terakhir <b>{self.nama_akun(profil)}</b>.")
-            ada_data = self._rekor_terakhir(pid) is not None
-        if ada_data:
-            return pid, profil, ("⚠️ Angka Rekor di layar beda dengan rekor terakhir karakter ini. "
-                                 "Kalau ini karakter lain, ketik /pilih NamaKarakter lalu test lagi.")
+            rekor_aktif = self._rekor_terakhir(pid)
+            if hasil.total is not None and hasil.total < r:
+                if rekor_aktif == r:
+                    return pid, profil, ""
+                cocok = [k for k in self.cfg["profil"] if k != pid and self._rekor_terakhir(k) == r]
+                if len(cocok) == 1:
+                    lama = self.nama_akun(profil)
+                    self._aktifkan_profil(cocok[0])
+                    pid, profil = cocok[0], self.cfg["profil"][cocok[0]]
+                    self.log.info("Rekor %s cocok dengan profil %s -> pindah otomatis dari %s",
+                                  r, pid, lama)
+                    return pid, profil, (f"🔄 Otomatis pindah dari <b>{lama}</b>: angka Rekor di layar "
+                                         f"sama dengan rekor terakhir <b>{self.nama_akun(profil)}</b>.")
+            if rekor_aktif is not None and r < rekor_aktif:
+                return pid, profil, (f"⚠️ <b>KEMUNGKINAN SALAH KARAKTER!</b> Rekor di layar ({umum.fmt(r)}) "
+                                     f"lebih rendah dari rekor <b>{self.nama_akun(profil)}</b> ({umum.fmt(rekor_aktif)}). "
+                                     "Buka Character Info karakter ini lalu ketik <code>/pindah</code>.")
+            if hasil.total is not None and hasil.total < r and rekor_aktif is not None and rekor_aktif != r:
+                return pid, profil, ("⚠️ Angka Rekor di layar beda dengan rekor terakhir karakter ini. "
+                                     "Kalau ini karakter lain, buka Character Info lalu ketik <code>/pindah</code>.")
         return pid, profil, ""
 
     def baca_layar(self, profil: dict, cfg_ocr: dict):
@@ -1125,8 +1130,8 @@ class Bot:
         return "\n🧙 Job: belum diisi (ketik /job NamaJob)" if catatan_ragu else ""
 
     def cek_info_karakter(self, teks_layar: str, cfg_ocr: dict) -> None:
-        """Kalau halaman info karakter (ada "ID:12345678") sedang terbuka, baca nick-nya."""
-        if not re.search(r"ID\s*[:;]?\s*\d{6,}", teks_layar) or time.time() - self.nick_cek_terakhir < 5:
+        """Kalau halaman info karakter (ada "ID:12345678") sedang terbuka, baca nick-nya (cepat tanggap 1.5 dtk)."""
+        if not re.search(r"ID\s*[:;]?\s*\d{6,}", teks_layar) or time.time() - self.nick_cek_terakhir < 1.5:
             return
         self.nick_cek_terakhir = time.time()
         img = self.foto_game(None)
@@ -1147,7 +1152,7 @@ class Bot:
         Kalau itu karakter LAIN yang sudah dikenal (ada di /daftar), pindah otomatis.
         Harus terlihat 2x berturut-turut, dan nama karakter aktif tidak boleh ikut terlihat
         (supaya tidak pindah gara-gara pemain lain lewat)."""
-        if time.time() - self.nama_cek_terakhir < 10:
+        if time.time() - self.nama_cek_terakhir < 6:
             return
         self.nama_cek_terakhir = time.time()
         with self.kunci:
@@ -1238,7 +1243,7 @@ class Bot:
                 pesan = (f"🔄 <b>Ganti karakter: {html.escape(nick)}</b> (ID {id_game})\n{lanjut}\n"
                          "Lihat semua karakter: /daftar")
                 h = self.hasil_terakhir
-                if h and h["pid"] == pid_lama and time.time() - h["jam"] <= 15 * 60:
+                if h and h["pid"] == pid_lama and time.time() - h["jam"] <= 60 * 60:
                     lama_nama = self.nama_akun(self.cfg["profil"].get(pid_lama, {}))
                     pesan += (f"\n\n⚠️ Hasil terakhir DPS <b>{umum.fmt(h['dps'])}</b> ({h['waktu'][11:]}) "
                               f"tadi masuk ke <b>{lama_nama}</b>.\nKalau itu milik "
@@ -1595,11 +1600,63 @@ class Bot:
                             f"🎯 Target: {umum.fmt(p.get('target'))}\nHasil test berikutnya masuk ke karakter ini.")
 
     def p_pindah(self, chat_id, isi):
-        """Pindahkan hasil DPS terakhir ke karakter aktif (salah masuk karena info karakter
-        baru dibuka SETELAH test)."""
+        """Pindahkan hasil DPS ke karakter yang benar.
+        - `/pindah` -> pindahkan hasil DPS terakhir ke karakter aktif.
+        - `/pindah <asal> <tujuan> [dps_atau_jam]` -> pindahkan hasil tertentu (termasuk yang sudah lewat/setelah restart).
+          Contoh: `/pindah soloish NitrousOxide 4060979` atau `/pindah soloish NitrousOxide 14:25`.
+        """
+        bag = isi.strip().split()
+        if len(bag) >= 2:
+            asal_sel = self._pilih_karakter(chat_id, bag[0])
+            if not asal_sel:
+                return
+            tujuan_sel = self._pilih_karakter(chat_id, bag[1])
+            if not tujuan_sel:
+                return
+            pid_asal, p_asal = asal_sel[0], asal_sel[1]
+            pid_tujuan, p_tujuan = tujuan_sel[0], tujuan_sel[1]
+            if pid_asal == pid_tujuan:
+                self.balas(chat_id, "Karakter asal dan tujuan sama.")
+                return
+            riwayat = catatan.baca_ok(pid_asal)
+            if not riwayat:
+                self.balas(chat_id, f"<b>{self.nama_akun(p_asal)}</b> tidak punya hasil DPS tersimpan.")
+                return
+            cari = bag[2].strip() if len(bag) >= 3 else ""
+            target_row = None
+            if not cari:
+                target_row = riwayat[-1]
+            else:
+                cari_angka = re.sub(r"[.,]", "", cari)
+                for r in reversed(riwayat):
+                    w_str = r["waktu"].strftime(catatan.FORMAT_WAKTU)
+                    if (cari_angka.isdigit() and str(r["dps"]) == cari_angka) or cari in w_str:
+                        target_row = r
+                        break
+            if not target_row:
+                self.balas(chat_id, f"Tidak ketemu hasil <code>{html.escape(cari)}</code> di "
+                                    f"<b>{self.nama_akun(p_asal)}</b>.")
+                return
+            waktu_str = target_row["waktu"].strftime(catatan.FORMAT_WAKTU)
+            with self.kunci:
+                baris = catatan.pindah_hasil(pid_asal, pid_tujuan, waktu_str)
+                if not baris:
+                    self.balas(chat_id, "Hasil itu tidak ditemukan lagi di catatan.")
+                    return
+                self.target_tercapai.pop(pid_asal, None)
+                self.target_tercapai.pop(pid_tujuan, None)
+            self.log.info("Hasil %s (%s) dipindah manual: %s -> %s",
+                          target_row["dps"], waktu_str, pid_asal, pid_tujuan)
+            self.balas(chat_id, f"✅ DPS <b>{umum.fmt(target_row['dps'])}</b> ({waktu_str[11:]}) dipindah dari "
+                                f"<b>{self.nama_akun(p_asal)}</b> ke <b>{self.nama_akun(p_tujuan)}</b>.\n"
+                                f"Ketik <code>/rapor {html.escape(str(p_tujuan.get('nick') or p_tujuan.get('nama') or pid_tujuan))}</code> untuk cek rapornya.")
+            return
+
         h = self.hasil_terakhir
         if not h:
-            self.balas(chat_id, "Tidak ada hasil DPS baru yang bisa dipindah (atau bot sempat restart).")
+            self.balas(chat_id, "Tidak ada hasil DPS terakhir di memori (atau bot sempat restart).\n"
+                                "Untuk pindah manual ketik: <code>/pindah NamaAsal NamaTujuan [DPS/jam]</code>\n"
+                                "Contoh: <code>/pindah soloish NitrousOxide 4060979</code>")
             return
         with self.kunci:
             tujuan = self.pid
