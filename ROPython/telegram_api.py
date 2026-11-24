@@ -123,6 +123,13 @@ class Telegram:
             data["reply_markup"] = json.dumps({"remove_keyboard": True})
         return self.panggil("sendMessage", data)
 
+    def hapus_pesan(self, chat_id: int, message_id: int) -> bool:
+        try:
+            self.panggil("deleteMessage", {"chat_id": chat_id, "message_id": message_id}, timeout=10)
+            return True
+        except Exception:
+            return False
+
     def kirim_dokumen(self, chat_id: int, isi: bytes, nama: str, caption: str = ""):
         return self.panggil("sendDocument", {"chat_id": chat_id, "caption": caption[:1000], "parse_mode": "HTML"},
                             files={"document": (nama, isi)}, timeout=90)

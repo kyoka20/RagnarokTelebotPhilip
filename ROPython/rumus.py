@@ -14,12 +14,51 @@ Catatan penting (lihat dokumen/peta/rumus-damage.md):
 from __future__ import annotations
 
 import json
+import math
 import re
+from datetime import datetime
 from typing import Any
+
+import numpy as np
 
 import catatan
 import sasaran as mod_sasaran
 import umum
+
+# Bucket pengali yang dikalibrasi oleh ML lokal (Ridge Regression di ruang log)
+BUCKET_KUNCI = ("base_atk", "m_dmg", "m_style", "m_ele_atk", "m_target", "m_def", "m_crit", "m_final")
+BUCKET_LABEL = {
+    "base_atk": "ATK / M.ATK",
+    "m_dmg": "P.DMG / M.DMG%",
+    "m_style": "Skill / Normal / Freq",
+    "m_ele_atk": "Elemental DMG%",
+    "m_target": "Bonus Ras / Ukuran / Ele",
+    "m_def": "DEF / Ignore DEF",
+    "m_crit": "CRIT / CRIT DMG%",
+    "m_final": "Final DMG%",
+}
+FILE_BOBOT = umum.FOLDER / "database_lokal" / "bobot_kalibrasi.json"
+_CACHE_BOBOT: tuple[float, dict[str, float]] = (0.0, {})
+
+
+def muat_bobot() -> dict[str, float]:
+    """Muat bobot hasil kalibrasi ML lokal jika tersedia dan lebih akurat dari bawaan."""
+    global _CACHE_BOBOT
+    try:
+        if not FILE_BOBOT.exists():
+            return {}
+        mt = FILE_BOBOT.stat().st_mtime
+        if _CACHE_BOBOT[0] == mt:
+            return _CACHE_BOBOT[1]
+        data = json.loads(FILE_BOBOT.read_text(encoding="utf-8"))
+        bobot = data.get("bobot") if data.get("aktif") else {}
+        if not isinstance(bobot, dict):
+            bobot = {}
+        bersih = {k: float(bobot[k]) for k in BUCKET_KUNCI if k in bobot}
+        _CACHE_BOBOT = (mt, bersih)
+        return bersih
+    except Exception:
+        return {}
 
 # Job magic & ranged (huruf kecil, cocok sebagian nama job)
 JOB_MAGIC = ("wizard", "mage", "sage", "professor", "sorcerer", "warlock",
@@ -97,7 +136,8 @@ def profil_build(stat: dict[str, Any], job: str = "", sumber_skill: list[dict] |
     }
 
 
-def hitung_komponen(stat: dict[str, Any], s_test: dict, pb: dict[str, Any]) -> dict[str, float]:
+def hitung_komponen(stat: dict[str, Any], s_test: dict, pb: dict[str, Any],
+                    pakai_kalibrasi: bool = True) -> dict[str, float]:
     """Hitung tiap pengali bucket DPS + skor gabungan (unit relatif)."""
     magic = pb["magic"]
     ranged = pb["ranged"]
@@ -157,18 +197,28 @@ def hitung_komponen(stat: dict[str, Any], s_test: dict, pb: dict[str, Any]) -> d
     final_all = _f(stat.get("Final DMG")) + _f(stat.get("Final MDMG" if magic else "Final PDMG"))
     m_final = 1.0 + final_all / 100.0
 
-    skor = base_atk * m_dmg * m_style * m_ele_atk * m_target * m_def * m_crit * m_final
-    return {
-        "skor": skor,
+    komp = {
         "base_atk": base_atk,
         "m_dmg": m_dmg,
         "m_style": m_style,
         "m_ele_atk": m_ele_atk,
         "m_target": m_target,
         "m_def": m_def,
-        "def_eff": def_eff,
         "m_crit": m_crit,
         "m_final": m_final,
+    }
+    bobot = muat_bobot() if pakai_kalibrasi else {}
+    if bobot:
+        skor = 1.0
+        for k, v in komp.items():
+            skor *= max(1e-6, v) ** bobot.get(k, 1.0)
+    else:
+        skor = base_atk * m_dmg * m_style * m_ele_atk * m_target * m_def * m_crit * m_final
+    return {
+        "skor": skor,
+        **komp,
+        "def_eff": def_eff,
+        "terkalibrasi": bool(bobot),
     }
 
 
@@ -371,17 +421,18 @@ def teks_simulasi(pid: str, profil: dict, stat: dict[str, Any], delta: dict[str,
         else:
             kurang = target - proyeksi
             baris.append(f"🎯 Masih kurang ±{umum.fmt(kurang)} (+{(target / proyeksi - 1) * 100:.1f}%) ke target {umum.fmt(target)}.")
-    baris.append("ℹ️ <i>Perkiraan model multi-bucket RTNW (belum termasuk perubahan rotasi/proc buff).</i>")
+    ket_kal = " (terkalibrasi ML lokal)" if muat_bobot() else ""
+    baris.append(f"ℹ️ <i>Perkiraan model multi-bucket RTNW{ket_kal} (belum termasuk perubahan rotasi/proc buff).</i>")
     return baris
 
 
-# ------------------------------------------------------------ kalibrasi dari data nyata
+# ------------------------------------------------------------ kalibrasi ML lokal (Ridge Regression)
 
-def kalibrasi(pid: str, s_test: dict, job: str = "") -> dict[str, Any] | None:
-    """Bandingkan prediksi model vs hasil test nyata di data/<pid>/test_stat.jsonl."""
+def _pasang_data_profil(pid: str, s_test: dict, job: str = "") -> list[tuple[np.ndarray, float]]:
+    """Ambil pasangan test berurutan (a -> b) yang stat-nya berubah dari data/<pid>/test_stat.jsonl."""
     f = catatan.folder_profil(pid) / "test_stat.jsonl"
     if not f.exists():
-        return None
+        return []
     entri = []
     for b in f.read_text(encoding="utf-8").splitlines():
         try:
@@ -391,21 +442,151 @@ def kalibrasi(pid: str, s_test: dict, job: str = "") -> dict[str, Any] | None:
         except ValueError:
             continue
     if len(entri) < 2:
-        return None
+        return []
 
-    galat = []
+    hasil: list[tuple[np.ndarray, float]] = []
     for a, b in zip(entri, entri[1:]):
-        if a["stat"] == b["stat"] or not a["dps"]:
+        if a["stat"] == b["stat"] or not a["dps"] or not b["dps"]:
+            continue
+        rasio_dps = float(b["dps"]) / float(a["dps"])
+        # Buang outlier ekstrem (salah karakter / test gagal) & noise sangat kecil (<2%)
+        if rasio_dps <= 0.3 or rasio_dps >= 3.0 or abs(rasio_dps - 1.0) < 0.02:
             continue
         pb = profil_build(a["stat"], job)
-        s_a = hitung_komponen(a["stat"], s_test, pb)["skor"]
-        s_b = hitung_komponen(b["stat"], s_test, pb)["skor"]
-        if s_a <= 0:
+        ka = hitung_komponen(a["stat"], s_test, pb, pakai_kalibrasi=False)
+        kb = hitung_komponen(b["stat"], s_test, pb, pakai_kalibrasi=False)
+        x = np.array([
+            math.log(max(1e-6, kb[k]) / max(1e-6, ka[k]))
+            for k in BUCKET_KUNCI
+        ], dtype=np.float64)
+        if np.linalg.norm(x) < 1e-4:
             continue
-        pred = (s_b / s_a - 1.0) * 100.0
-        nyata = (b["dps"] / a["dps"] - 1.0) * 100.0
-        if abs(nyata) >= 3.0:
-            galat.append(abs(pred - nyata))
-    if not galat:
+        hasil.append((x, math.log(rasio_dps)))
+    return hasil
+
+
+def kalibrasi(pid: str, s_test: dict, job: str = "") -> dict[str, Any] | None:
+    """Bandingkan prediksi model vs hasil test nyata di data/<pid>/test_stat.jsonl."""
+    pasang = _pasang_data_profil(pid, s_test, job)
+    if not pasang:
         return None
+    bobot = muat_bobot()
+    w = np.array([bobot.get(k, 1.0) for k in BUCKET_KUNCI], dtype=np.float64)
+    galat = []
+    for x, y in pasang:
+        pred_pct = (math.exp(float(np.dot(x, w))) - 1.0) * 100.0
+        nyata_pct = (math.exp(y) - 1.0) * 100.0
+        galat.append(abs(pred_pct - nyata_pct))
     return {"jumlah_pasang": len(galat), "rata_galat_pct": round(sum(galat) / len(galat), 2)}
+
+
+def latih_kalibrasi(s_test: dict, profil_map: dict[str, dict] | None = None,
+                    lam: float = 0.02, min_pasang: int = 5) -> dict[str, Any]:
+    """Latih bobot bucket rumus damage secara 100% lokal (numpy Ridge Regression, tanpa GPU/internet).
+
+    Menyelesaikan: w = 1 + (X^T X + lam * I)^-1 X^T (y - X @ 1)
+    - Bucket yang belum pernah berubah stat-nya tetap aman di 1.0.
+    - Bobot dibatasi [0.3, 2.0] agar tahan terhadap noise test manual.
+    - Hanya diaktifkan otomatis jika jumlah pasangan >= min_pasang dan galat membaik.
+    """
+    global _CACHE_BOBOT
+    profil_map = profil_map or {}
+    semua_x: list[np.ndarray] = []
+    semua_y: list[float] = []
+    jml_karakter = 0
+
+    if umum.FOLDER_DATA.exists():
+        for sub in sorted(umum.FOLDER_DATA.iterdir()):
+            if not sub.is_dir() or sub.name.startswith("_"):
+                continue
+            pid = sub.name
+            job = (profil_map.get(pid) or {}).get("job", "")
+            pasang = _pasang_data_profil(pid, s_test, job)
+            if pasang:
+                jml_karakter += 1
+                for x, y in pasang:
+                    semua_x.append(x)
+                    semua_y.append(y)
+
+    n = len(semua_x)
+    if n == 0:
+        return {"jumlah_pasang": 0, "jumlah_karakter": 0, "aktif": False,
+                "alasan": "Belum ada pasangan test dengan perubahan Detailed Stats."}
+
+    X = np.vstack(semua_x)
+    y = np.array(semua_y, dtype=np.float64)
+    w_awal = np.ones(len(BUCKET_KUNCI), dtype=np.float64)
+
+    def _mae_pct(w_vec: np.ndarray) -> float:
+        pred = (np.exp(X @ w_vec) - 1.0) * 100.0
+        nyata = (np.exp(y) - 1.0) * 100.0
+        return float(np.mean(np.abs(pred - nyata)))
+
+    galat_awal = _mae_pct(w_awal)
+
+    if n < min_pasang:
+        return {
+            "jumlah_pasang": n,
+            "jumlah_karakter": jml_karakter,
+            "min_pasang": min_pasang,
+            "galat_awal_pct": round(galat_awal, 2),
+            "aktif": False,
+            "alasan": f"Butuh minimal {min_pasang} pasangan test (baru ada {n}).",
+        }
+
+    # Ridge Regression berpusat di w_awal = 1.0
+    d = len(BUCKET_KUNCI)
+    A = X.T @ X + lam * np.eye(d, dtype=np.float64)
+    rhs = X.T @ (y - X @ w_awal)
+    delta_w = np.linalg.solve(A, rhs)
+    w_baru = np.clip(w_awal + delta_w, 0.3, 2.0)
+
+    galat_baru = _mae_pct(w_baru)
+    membaik = galat_baru < galat_awal - 0.1
+    bobot_dict = {k: round(float(w_baru[i]), 3) for i, k in enumerate(BUCKET_KUNCI)}
+
+    simpan = {
+        "diperbarui": datetime.now().isoformat(timespec="seconds"),
+        "jumlah_pasang": n,
+        "jumlah_karakter": jml_karakter,
+        "galat_awal_pct": round(galat_awal, 2),
+        "galat_baru_pct": round(galat_baru, 2),
+        "aktif": bool(membaik),
+        "bobot": bobot_dict,
+    }
+    try:
+        FILE_BOBOT.parent.mkdir(parents=True, exist_ok=True)
+        FILE_BOBOT.write_text(json.dumps(simpan, ensure_ascii=False, indent=2), encoding="utf-8")
+        _CACHE_BOBOT = (0.0, {})
+    except Exception:
+        pass
+    return simpan
+
+
+def teks_kalibrasi(s_test: dict, profil_map: dict[str, dict] | None = None) -> list[str]:
+    """Jalankan kalibrasi ML lokal dan kembalikan ringkasan HTML untuk Telegram."""
+    h = latih_kalibrasi(s_test, profil_map)
+    n = h.get("jumlah_pasang", 0)
+    baris = ["🧠 <b>Kalibrasi Rumus Damage (ML Lokal)</b>"]
+    if n == 0:
+        baris.append("Belum ada data pasangan test + perubahan Detailed Stats.")
+        baris.append("💡 <i>Cara kumpul data otomatis: setiap habis ganti equip/kartu/batu, "
+                     "buka Character Info &gt; Detailed Stats sebentar lalu jalankan Damage Challenge.</i>")
+        return baris
+    baris.append(f"• Data terkumpul: <b>{n}</b> pasangan test dari <b>{h.get('jumlah_karakter', 0)}</b> karakter")
+    if not h.get("bobot"):
+        baris.append(f"• Rata-rata meleset saat ini: <b>±{h.get('galat_awal_pct', 0)}%</b>")
+        baris.append(f"⏳ {h.get('alasan', '')}")
+        baris.append("💡 <i>Teruskan buka Detailed Stats sebelum test DPS; saat data cukup, bobot otomatis dikalibrasi.</i>")
+        return baris
+    awal, baru = h["galat_awal_pct"], h["galat_baru_pct"]
+    status = "✅ <b>AKTIF</b> dipakai di /sim dan /saran" if h["aktif"] else "ℹ️ Model bawaan masih lebih akurat (bobot belum dipakai)"
+    baris.append(f"• Rata-rata meleset: <b>±{awal}%</b> → <b>±{baru}%</b>")
+    baris.append(f"• Status: {status}")
+    ubah = [(BUCKET_LABEL[k], v) for k, v in h["bobot"].items() if abs(v - 1.0) >= 0.03]
+    if ubah:
+        baris.append("\n<b>Bobot hasil belajar (bawaan = 1,00):</b>")
+        for lbl, v in sorted(ubah, key=lambda x: -abs(x[1] - 1.0)):
+            arah = "lebih kuat" if v > 1.0 else "lebih lemah"
+            baris.append(f"• {lbl}: <b>{v:.2f}</b> ({arah})")
+    return baris

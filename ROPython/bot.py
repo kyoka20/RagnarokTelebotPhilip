@@ -28,6 +28,7 @@ import bacabuild
 import belajar
 import catatan
 import datagame
+import gemini
 import harian
 import job
 import latih
@@ -69,6 +70,10 @@ BANTUAN = """<b>Daftar perintah</b>
 /sasaran - sasaran Damage Challenge + kartu yang cocok untuk test
 /saran oniichan - saran build 1 karakter (DPS, stat terbuang, prioritas stat & batu). Salah ketik tidak apa-apa
 /sim +10% pdmg - simulasi kenaikan DPS & proyeksi target (boleh gabung: /sim +300 atk +15% vs medium)
+/kalibrasi - kalibrasi rumus DPS pakai ML lokal dari data test nyata
+(chat biasa / kirim foto) - langsung ngobrol & tanya racikan ke AI tanpa perlu command (otomatis baca stat karakter aktif)
+/analisis - baca layar game sekarang (equip/kartu/stat/skill) + saran DPS pakai AI Vision
+/gemini_key API_KEY - pasang API key Gemini (pesan otomatis dihapus)
 /batu - saran batu enchant terbaik per slot untuk DPS  |  /batu head
 /record_train - mode train: rekam layar game saat Anda membuka halaman (enchant, kartu, dll)
 /stop - saat mode train jalan: hentikan mode train (pemantauan DPS tetap jalan)
@@ -104,6 +109,9 @@ MENU = [("input", "Isi / ubah data pembeli"), ("daftar", "Semua karakter + DPS t
         ("sasaran", "Sasaran Damage Challenge + kartu yang cocok"),
         ("saran", "Saran build karakter (contoh: /saran oniichan)"),
         ("sim", "Simulasi kenaikan DPS (contoh: /sim +10% pdmg)"),
+        ("kalibrasi", "Kalibrasi rumus DPS (ML lokal dari hasil test)"),
+        ("tanya", "Tanya racikan build ke AI (otomatis baca stat aktif)"),
+        ("analisis", "Baca layar equip/kartu/stat + saran DPS (AI Vision)"),
         ("batu", "Saran batu enchant per slot untuk DPS"),
         ("record_train", "Mode train: rekam layar game untuk dipelajari"),
         ("db", "Cari equip / kartu / skill (contoh: /db Dracula)"),
@@ -158,6 +166,7 @@ class Bot:
 
         self.cek_terakhir: datetime | None = None
         self.keadaan = "belum ada cek"
+        self.riwayat_ai: dict[int, tuple[float, list[tuple[str, str]]]] = {}
         self.gagal_berturut = 0
         self.sudah_warn_gagal = False
         self.acuan_tanpa_hasil = time.time()
@@ -856,6 +865,135 @@ class Bot:
             self.log.exception("Simulasi DPS gagal")
             self.balas(chat_id, f"Gagal simulasi: {html.escape(str(e))}")
 
+    def p_kalibrasi(self, chat_id, isi):
+        """/kalibrasi - latih & cek bobot rumus damage pakai ML lokal (numpy Ridge Regression)."""
+        try:
+            with self.kunci:
+                profil_map = copy.deepcopy(self.cfg.get("daftar_profil") or {})
+            baris = rumus.teks_kalibrasi(self.sasaran_test(), profil_map)
+            self.balas(chat_id, "\n".join(baris))
+        except Exception as e:
+            self.log.exception("Kalibrasi ML lokal gagal")
+            self.balas(chat_id, f"Gagal kalibrasi: {html.escape(str(e))}")
+
+    def p_gemini_key(self, chat_id, isi, pesan: dict | None = None):
+        """/gemini_key <API_KEY> - simpan API key Gemini ke config.json & hapus pesan berisi key."""
+        if pesan and pesan.get("message_id"):
+            self.tg.hapus_pesan(chat_id, pesan["message_id"])
+        key = isi.strip()
+        if not key:
+            ada, model = gemini.ambil_cfg(self.cfg)
+            status = f"✅ sudah terpasang (model: <code>{html.escape(model)}</code>)" if ada else "❌ belum dipasang"
+            self.balas(chat_id, f"🤖 Status Gemini API: {status}\n"
+                                "Cara pasang: <code>/gemini_key AIza...</code> (pesan key otomatis dihapus).\n"
+                                "Cara hapus: <code>/gemini_key hapus</code>")
+            return
+        with self.kunci:
+            g = self.cfg.setdefault("gemini", {})
+            if key.lower() in ("hapus", "off", "reset", "kosong"):
+                g["api_key"] = ""
+                umum.simpan_config(self.cfg)
+                self.mtime_config = self._mtime()
+                self.balas(chat_id, "🗑️ API key Gemini sudah dihapus.")
+                return
+            g["api_key"] = key
+            g.setdefault("model", gemini.MODEL_BAWAAN)
+            umum.simpan_config(self.cfg)
+            self.mtime_config = self._mtime()
+        self.balas(chat_id, "✅ API key Gemini tersimpan (pesan berisi key sudah dihapus dari chat).\n"
+                            "Siap pakai: <code>/tanya ...</code> dan <code>/analisis</code>.")
+
+    def p_tanya(self, chat_id, isi, diam: bool = False):
+        """Chat bebas atau /tanya <pertanyaan> - tanya racikan build ke Gemini dengan konteks karakter aktif."""
+        pertanyaan = isi.strip()
+        if not pertanyaan:
+            self.balas(chat_id, "Langsung ketik pertanyaan biasa saja tanpa command, atau contoh:\n"
+                                "• <code>budget tipis, lebih worth ganti kartu atau up batu?</code>\n"
+                                "• <code>kenapa DPS susah naik lagi?</code>\n"
+                                "Bot otomatis menyertakan stat, DPS, dan prioritas karakter aktif.")
+            return
+        api_key, model = gemini.ambil_cfg(self.cfg)
+        if not api_key:
+            self.balas(chat_id, "🤖 API key Gemini belum diisi.\n"
+                                "Kirim <code>/gemini_key API_KEY</code> dulu (pesan key otomatis dihapus).")
+            return
+        with self.kunci:
+            pid, profil = self.pid, copy.deepcopy(self.profil)
+            ts_lama, riw_lama = self.riwayat_ai.get(chat_id, (0.0, []))
+            # Reset memori obrolan kalau sudah diam > 15 menit
+            riwayat = list(riw_lama[-6:]) if (time.time() - ts_lama <= 900) else []
+        s_test = self.sasaran_test()
+        if not diam:
+            self.balas(chat_id, "🤖 <i>Sedang berpikir...</i>")
+
+        def _kerja():
+            try:
+                konteks = gemini.konteks_karakter(pid, profil, s_test)
+                sistem = f"{gemini.SISTEM_TANYA}\n\nData karakter aktif saat ini:\n{konteks}"
+                jawaban = gemini.tanya(api_key, pertanyaan, system=sistem, model=model, riwayat=riwayat)
+                with self.kunci:
+                    baru = (riwayat + [(pertanyaan, jawaban)])[-6:]
+                    self.riwayat_ai[chat_id] = (time.time(), baru)
+                self.balas(chat_id, gemini.ke_html_telegram(jawaban))
+            except gemini.GeminiError as e:
+                self.balas(chat_id, f"⚠️ {html.escape(str(e))}")
+            except Exception as e:
+                self.log.exception("Gemini /tanya gagal")
+                self.balas(chat_id, f"⚠️ Gagal menghubungi AI: {html.escape(str(e))}")
+
+        threading.Thread(target=_kerja, daemon=True, name="gemini-tanya").start()
+
+    def p_analisis(self, chat_id, isi, pesan: dict | None = None, diam: bool = False):
+        """/analisis [catatan] atau kirim foto langsung - baca layar/foto pakai Gemini Vision."""
+        api_key, model = gemini.ambil_cfg(self.cfg)
+        if not api_key:
+            self.balas(chat_id, "🤖 API key Gemini belum diisi.\n"
+                                "Kirim <code>/gemini_key API_KEY</code> dulu (pesan key otomatis dihapus).")
+            return
+
+        # Cek apakah ada foto di pesan ini atau pesan yang di-reply
+        sumber_foto = None
+        if pesan:
+            if pesan.get("photo"):
+                sumber_foto = pesan["photo"][-1]["file_id"]
+            elif (pesan.get("reply_to_message") or {}).get("photo"):
+                sumber_foto = pesan["reply_to_message"]["photo"][-1]["file_id"]
+
+        with self.kunci:
+            pid, profil = self.pid, copy.deepcopy(self.profil)
+        s_test = self.sasaran_test()
+        catatan_user = isi.strip()
+        if not diam:
+            self.balas(chat_id, "👁️ <i>Menganalisis gambar dengan Gemini Vision...</i>")
+
+        def _kerja():
+            try:
+                if sumber_foto:
+                    info = self.tg.panggil("getFile", {"file_id": sumber_foto})
+                    r = requests.get(f"https://api.telegram.org/file/bot{self.tg.token}/{info['file_path']}", timeout=60)
+                    r.raise_for_status()
+                    img_bytes = r.content
+                else:
+                    img = self.foto_game(None)
+                    if img is None:
+                        img = layar.ambil_layar_penuh(self.area_terdeteksi)
+                    img_bytes = layar.ke_jpg(img, kualitas=88)
+
+                konteks = gemini.konteks_karakter(pid, profil, s_test)
+                prompt = f"Konteks karakter aktif:\n{konteks}\n\n{gemini.PROMPT_VISION_UMUM}"
+                if catatan_user:
+                    prompt += f"\n\nFokus khusus dari pengguna: {catatan_user}"
+                jawaban = gemini.tanya_gambar(api_key, img_bytes, prompt, system=gemini.SISTEM_VISION, model=model)
+                nama = html.escape(profil.get("nick") or profil.get("nama") or pid)
+                self.balas(chat_id, f"👁️ <b>Analisis Layar ({nama})</b>\n\n{gemini.ke_html_telegram(jawaban)}")
+            except gemini.GeminiError as e:
+                self.balas(chat_id, f"⚠️ {html.escape(str(e))}")
+            except Exception as e:
+                self.log.exception("Gemini /analisis gagal")
+                self.balas(chat_id, f"⚠️ Gagal analisis layar: {html.escape(str(e))}")
+
+        threading.Thread(target=_kerja, daemon=True, name="gemini-vision").start()
+
     def p_batu(self, chat_id, isi):
         try:
             self.balas(chat_id, "\n".join(sasaran.saran_batu(isi.strip())))
@@ -1229,20 +1367,29 @@ class Bot:
                 antre = [x for x in self.dok_tunggu.get(chat_id, []) if time.time() - x[0] <= 600]
                 antre.append((time.time(), pesan.get("media_group_id"), pesan["document"]))
                 self.dok_tunggu[chat_id] = antre[-30:]
-        if chat_id is None or not teks:
+        ada_foto = bool(pesan.get("photo"))
+        if chat_id is None or (not teks and not ada_foto):
             return
         if chat_id not in self.chat_ids and chat_id not in self.dev_ids:
             # KEAMANAN: orang lain diabaikan total, tidak dibalas.
             self.log.warning("Pesan dari chat_id tak dikenal %s diabaikan.", chat_id)
             return
         if not teks.startswith("/"):
-            if chat_id in self.isian:
+            if chat_id in self.isian and teks:
                 self.lanjut_isian(chat_id, teks)
             else:
-                # Misalnya bot sempat restart di tengah /input: jangan diam saja.
-                self.kirim.tambah("balasan", self.tg.kirim_teks, chat_id,
-                                  "ℹ️ Tidak ada /input yang sedang berjalan (mungkin bot sempat restart).\n"
-                                  "Mulai lagi: /input  |  Daftar perintah: /help", None, True)
+                self.muat_ulang_jika_berubah()
+                api_key, _ = gemini.ambil_cfg(self.cfg)
+                if api_key:
+                    if ada_foto:
+                        self.p_analisis(chat_id, teks, pesan, diam=True)
+                    else:
+                        self.p_tanya(chat_id, teks, diam=True)
+                elif teks:
+                    # Misalnya bot sempat restart di tengah /input: jangan diam saja.
+                    self.kirim.tambah("balasan", self.tg.kirim_teks, chat_id,
+                                      "ℹ️ Tidak ada /input yang sedang berjalan (mungkin bot sempat restart).\n"
+                                      "Mulai lagi: /input  |  Daftar perintah: /help", None, True)
             return
         if chat_id in self.isian and teks.split()[0].lower() != "/input":
             self.isian.pop(chat_id, None)
@@ -1254,7 +1401,8 @@ class Bot:
         perintah = kata[0].lower().split("@")[0]
         isi = kata[1].strip() if len(kata) > 1 else ""
         # " [dev]" = dari developer, supaya /pemakaian hanya menghitung perintah Philip
-        self.log.info("Perintah: %s %s%s", perintah, isi,
+        isi_log = "***" if perintah == "/gemini_key" and isi else isi
+        self.log.info("Perintah: %s %s%s", perintah, isi_log,
                       " [dev]" if chat_id in self.dev_ids and chat_id not in self.chat_ids else "")
         m = re.fullmatch(r"(/[a-z_]+?)(\d+)", perintah)  # salah ketik spasi: "/lihat24" = "/lihat 24"
         if m:
@@ -1290,6 +1438,12 @@ class Bot:
             "/sasaran": self.p_sasaran,
             "/saran": self.p_saran, "/advice": self.p_saran,
             "/sim": self.p_sim, "/simulasi": self.p_sim, "/calc": self.p_sim,
+            "/kalibrasi": self.p_kalibrasi, "/kal": self.p_kalibrasi,
+            "/tanya": self.p_tanya, "/ai": self.p_tanya, "/gemini": self.p_tanya,
+            "/analisis": lambda c, i: self.p_analisis(c, i, pesan),
+            "/baca_equip": lambda c, i: self.p_analisis(c, i, pesan),
+            "/vision": lambda c, i: self.p_analisis(c, i, pesan),
+            "/gemini_key": lambda c, i: self.p_gemini_key(c, i, pesan),
             "/batu": self.p_batu, "/saran_batu": self.p_batu, "/gem_saran": self.p_batu,
             "/record_train": self.p_rekam, "/rekam": self.p_rekam, "/train": self.p_rekam,
             "/stop_train": self.p_rekam_stop, "/rekam_stop": self.p_rekam_stop,
