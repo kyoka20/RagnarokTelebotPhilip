@@ -901,7 +901,16 @@ class Bot:
             umum.simpan_config(self.cfg)
             self.mtime_config = self._mtime()
         self.balas(chat_id, "✅ API key Gemini tersimpan (pesan berisi key sudah dihapus dari chat).\n"
-                            "Siap pakai: <code>/tanya ...</code> dan <code>/analisis</code>.")
+                            "Langsung chat biasa (atau kirim foto layar) tanpa perlu command!")
+
+    def _selesai_loading(self, chat_id: int, msg_id: int | None, teks_html: str) -> None:
+        """Ubah pesan loading menjadi jawaban akhir (tanpa meninggalkan pesan sampah)."""
+        if msg_id and len(teks_html) <= 3900:
+            if self.tg.edit_teks(chat_id, msg_id, teks_html):
+                return
+        if msg_id:
+            self.tg.hapus_pesan(chat_id, msg_id)
+        self.balas(chat_id, teks_html)
 
     def p_tanya(self, chat_id, isi, diam: bool = False):
         """Chat bebas atau /tanya <pertanyaan> - tanya racikan build ke Gemini dengan konteks karakter aktif."""
@@ -923,10 +932,15 @@ class Bot:
             # Reset memori obrolan kalau sudah diam > 15 menit
             riwayat = list(riw_lama[-6:]) if (time.time() - ts_lama <= 900) else []
         s_test = self.sasaran_test()
-        if not diam:
-            self.balas(chat_id, "🤖 <i>Sedang berpikir...</i>")
 
         def _kerja():
+            msg_id = None
+            try:
+                self.tg.kirim_aksi(chat_id, "typing")
+                res = self.tg.kirim_teks(chat_id, "⏳ <i>Sebentar...</i>")
+                msg_id = (res or {}).get("message_id")
+            except Exception:
+                pass
             try:
                 konteks = gemini.konteks_karakter(pid, profil, s_test)
                 sistem = f"{gemini.SISTEM_TANYA}\n\nData karakter aktif saat ini:\n{konteks}"
@@ -934,12 +948,12 @@ class Bot:
                 with self.kunci:
                     baru = (riwayat + [(pertanyaan, jawaban)])[-6:]
                     self.riwayat_ai[chat_id] = (time.time(), baru)
-                self.balas(chat_id, gemini.ke_html_telegram(jawaban))
+                self._selesai_loading(chat_id, msg_id, gemini.ke_html_telegram(jawaban))
             except gemini.GeminiError as e:
-                self.balas(chat_id, f"⚠️ {html.escape(str(e))}")
+                self._selesai_loading(chat_id, msg_id, f"⚠️ {html.escape(str(e))}")
             except Exception as e:
                 self.log.exception("Gemini /tanya gagal")
-                self.balas(chat_id, f"⚠️ Gagal menghubungi AI: {html.escape(str(e))}")
+                self._selesai_loading(chat_id, msg_id, f"⚠️ Gagal menghubungi AI: {html.escape(str(e))}")
 
         threading.Thread(target=_kerja, daemon=True, name="gemini-tanya").start()
 
@@ -963,10 +977,15 @@ class Bot:
             pid, profil = self.pid, copy.deepcopy(self.profil)
         s_test = self.sasaran_test()
         catatan_user = isi.strip()
-        if not diam:
-            self.balas(chat_id, "👁️ <i>Menganalisis gambar dengan Gemini Vision...</i>")
 
         def _kerja():
+            msg_id = None
+            try:
+                self.tg.kirim_aksi(chat_id, "typing")
+                res = self.tg.kirim_teks(chat_id, "⏳ <i>Menganalisis gambar...</i>")
+                msg_id = (res or {}).get("message_id")
+            except Exception:
+                pass
             try:
                 if sumber_foto:
                     info = self.tg.panggil("getFile", {"file_id": sumber_foto})
@@ -985,12 +1004,12 @@ class Bot:
                     prompt += f"\n\nFokus khusus dari pengguna: {catatan_user}"
                 jawaban = gemini.tanya_gambar(api_key, img_bytes, prompt, system=gemini.SISTEM_VISION, model=model)
                 nama = html.escape(profil.get("nick") or profil.get("nama") or pid)
-                self.balas(chat_id, f"👁️ <b>Analisis Layar ({nama})</b>\n\n{gemini.ke_html_telegram(jawaban)}")
+                self._selesai_loading(chat_id, msg_id, f"👁️ <b>Analisis Layar ({nama})</b>\n\n{gemini.ke_html_telegram(jawaban)}")
             except gemini.GeminiError as e:
-                self.balas(chat_id, f"⚠️ {html.escape(str(e))}")
+                self._selesai_loading(chat_id, msg_id, f"⚠️ {html.escape(str(e))}")
             except Exception as e:
                 self.log.exception("Gemini /analisis gagal")
-                self.balas(chat_id, f"⚠️ Gagal analisis layar: {html.escape(str(e))}")
+                self._selesai_loading(chat_id, msg_id, f"⚠️ Gagal analisis layar: {html.escape(str(e))}")
 
         threading.Thread(target=_kerja, daemon=True, name="gemini-vision").start()
 

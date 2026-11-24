@@ -25,8 +25,13 @@ import rumus
 import statistik
 import umum
 
-MODEL_BAWAAN = "gemini-flash-latest"
-MODEL_CADANGAN = ["gemini-flash-lite-latest", "gemini-3.8-flash"]
+MODEL_BAWAAN = "gemini-3.5-flash-lite"
+MODEL_CADANGAN = [
+    "gemini-flash-lite-latest",
+    "gemini-3.1-flash-lite",
+    "gemini-3.5-flash",
+    "gemma-4-26b-a4b-it",
+]
 URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
 
@@ -51,7 +56,10 @@ def ambil_cfg(cfg: dict) -> tuple[str, str]:
     g = cfg.get("gemini") or {}
     if isinstance(g, dict):
         key = str(g.get("api_key") or "").strip()
-        model = str(g.get("model") or "").strip() or MODEL_BAWAAN
+        model = str(g.get("model") or "").strip()
+        # Migrasi otomatis dari default lama yang sering 503/lambat
+        if not model or model in ("gemini-flash-latest", "gemini-flash-lite-latest"):
+            model = MODEL_BAWAAN
         return key, model
     return "", MODEL_BAWAAN
 
@@ -101,26 +109,31 @@ def _post_json(url: str, body: dict, api_key: str, timeout: float) -> tuple[int,
         raise GeminiError(f"Tidak bisa menghubungi Gemini ({type(e).__name__}).") from None
 
 
-def _kirim(api_key: str, body: dict, model: str = "", timeout: float = 35,
+def _kirim(api_key: str, body: dict, model: str = "", timeout: float = 18,
            coba_lain: bool = True) -> str:
     if not api_key:
         raise GeminiError("API key Gemini belum diisi. Kirim: /gemini_key <API_KEY>")
     daftar = [model or MODEL_BAWAAN]
     if coba_lain:
         daftar += [m for m in MODEL_CADANGAN if m not in daftar]
-    status, teks_resp = 0, ""
-    for i, m in enumerate(daftar):
-        for _ in range(2 if (coba_lain and i == 0) else 1):
+    status, teks_resp, err_akhir = 0, "", ""
+    for m in daftar:
+        try:
             status, teks_resp = _post_json(URL.format(model=m), body, api_key, timeout)
-            if status == 200:
-                break
-            logging.warning("Gemini %s HTTP %s: %s", m, status, teks_resp[:250])
-            if status < 500:
-                break
-            time.sleep(1.5)
-        if status == 200 or (status not in (404, 429) and status < 500):
+        except GeminiError as e:
+            logging.warning("Gemini %s gagal: %s", m, e)
+            err_akhir = str(e)
+            if coba_lain:
+                continue
+            raise
+        if status == 200:
             break
+        logging.warning("Gemini %s HTTP %s: %s", m, status, teks_resp[:250])
+        if status not in (404, 429) and status < 500:
+            break  # error yang tidak beres dengan ganti model (mis. API key salah)
     if status != 200:
+        if status == 0 and err_akhir:
+            raise GeminiError(err_akhir)
         raise GeminiError(_pesan_error(status, teks_resp))
     try:
         data = json.loads(teks_resp)
@@ -134,7 +147,7 @@ def _kirim(api_key: str, body: dict, model: str = "", timeout: float = 35,
 
 
 def tanya(api_key: str, prompt: str, system: str = "", model: str = "",
-          timeout: float = 35, suhu: float = 0.3, coba_lain: bool = True,
+          timeout: float = 18, suhu: float = 0.3, coba_lain: bool = True,
           riwayat: list[tuple[str, str]] | None = None) -> str:
     """Kirim pertanyaan teks ke Gemini API (bisa menyertakan riwayat chat singkat)."""
     contents: list[dict[str, Any]] = []

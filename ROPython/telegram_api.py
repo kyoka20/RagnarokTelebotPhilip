@@ -130,6 +130,25 @@ class Telegram:
         except Exception:
             return False
 
+    def edit_teks(self, chat_id: int, message_id: int, teks: str) -> bool:
+        try:
+            self.panggil("editMessageText", {
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "text": teks[:4096],
+                "parse_mode": "HTML",
+                "disable_web_page_preview": "true",
+            }, timeout=15)
+            return True
+        except Exception:
+            return False
+
+    def kirim_aksi(self, chat_id: int, aksi: str = "typing") -> None:
+        try:
+            self.panggil("sendChatAction", {"chat_id": chat_id, "action": aksi}, timeout=10)
+        except Exception:
+            pass
+
     def kirim_dokumen(self, chat_id: int, isi: bytes, nama: str, caption: str = ""):
         return self.panggil("sendDocument", {"chat_id": chat_id, "caption": caption[:1000], "parse_mode": "HTML"},
                             files={"document": (nama, isi)}, timeout=90)
