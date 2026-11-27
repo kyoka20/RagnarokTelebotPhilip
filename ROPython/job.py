@@ -274,6 +274,33 @@ def _cari_nick(kata: list) -> tuple[str, str] | None:
     return None
 
 
+def baca_nama_tengah(img: Image.Image, cfg_ocr: dict) -> list[str]:
+    """Semua tulisan hijau di sekitar tengah jendela game, urut dari huruf PALING BESAR.
+
+    Nama karakter kita = hijau, di bawah badannya, hurufnya lebih besar dari nama pet
+    ("Soloish97" tinggi 18 px vs pet "Dusk" 11 px). Jadi hasil[0] = calon nama karakter.
+    Angka murni (heal) dan tulisan < 3 huruf dibuang."""
+    w, h = img.size
+    potong = img.convert("RGB").crop((int(w * 0.25), int(h * 0.30), int(w * 0.75), int(h * 0.85)))
+    a = np.asarray(potong).astype(int)
+    r, g_, b = a[..., 0], a[..., 1], a[..., 2]
+    hijau = (g_ > 170) & (g_ - b > 70) & (r > 120) & (g_ >= r - 10)
+    saring = Image.fromarray(np.where(hijau, 0, 255).astype("uint8")).convert("RGB")
+    for skala in (1, 2):
+        g = saring if skala == 1 else saring.resize((saring.width * 2, saring.height * 2))
+        kata, _ = ocr._jalankan_mesin(g, cfg_ocr)
+        calon = []
+        for bar in ocr._kelompokkan_baris(kata):
+            teks = "".join(k.teks for k in bar).strip()
+            n = ocr._norm(teks)
+            if 3 <= len(teks) <= 24 and len(n) >= 3 and not n.isdigit() and re.search(r"[A-Za-z]", teks):
+                calon.append((max(k.h for k in bar), teks))
+        if calon:
+            calon.sort(key=lambda c: -c[0])
+            return [t for _, t in calon]
+    return []
+
+
 def nama_di_tengah(img: Image.Image, cfg_ocr: dict, nicks: dict[str, str]) -> set[str]:
     """Baca papan nama di sekitar tengah jendela game (nama karakter kita tampil di bawah
     badannya, dan karakter kita selalu di tengah layar). Hasil: kunci `nicks` yang terlihat.

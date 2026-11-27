@@ -28,6 +28,7 @@ Dibuat 2026-11-22. Semua kode di `ROPython/bot.py`, bagian `# developer (/update
 - Ringkasan otomatis malam (`loop_harian` → `Bot.ringkasan_malam` + `harian.ringkas`): 1 pesan pendek; `/hari` & `/tagihan` tetap versi lengkap (`_kelompok_tagihan` dipakai bersama).
 
 - `karakter_terlihat`: ID sama + nick mirip (≥0.8) = salah baca OCR, diam & nick tidak ditimpa (dulu spam "Nick terbaca" 18x/hari).
+- Ganti karakter tanpa buka profil (27/11): `cek_nama_karakter` baca nama HIJAU di bawah karakter (`job.baca_nama_tengah`, huruf terbesar = nama kita; pet "Dusk" lebih kecil). Nick dikenal → pindah setelah 2 bacaan; nick baru → `karakter_baru_dari_nama` buat profil tanpa ID (`dari_nama: true`) setelah 3 bacaan (cek ulang tiap 2 dtk saat ada calon). ID terisi diam-diam saat Character Info dibuka (`karakter_terlihat`) atau lewat `/input` (`simpan_pembeli` melengkapi profil aktif tanpa ID). Dulu hanya nick yang sudah tersimpan yang dicocokkan → karakter pembeli baru baru ketahuan setelah buka profil.
 - `/lihat24` = `/lihat 24` (angka nempel), `/list` = `/daftar`.
 - Perintah paling sering dipakai Philip (log 10–22/11): /job, /lihat, /help, /daftar, /pindah, /input → jangan diubah perilakunya.
 - Simulasi semua perintah: `scratchpad/skrip/simulasi.py <folder salinan>` (fake Telegram, jalankan di salinan, bukan folder asli).
