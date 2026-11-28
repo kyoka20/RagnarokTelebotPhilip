@@ -51,3 +51,7 @@ Kalau mau ubah:
 - daftar file terlarang → `DILARANG_UPDATE`
 - teks bantuan dev → `BANTUAN_DEV`
 - siapa developer → `DEV_DEFAULT`
+
+## /cek_laptop (28-11-2026)
+- `/cek_laptop` atau `/cek_lemot` (siapa saja boleh): cari pelaku laptop lemot TANPA modul tambahan (PowerShell bawaan). Isinya: CPU, RAM, disk sibuk, CPU diperlambat (panas/baterai), main pakai baterai, mode hemat daya, bot RO dobel, Defender/Windows Update/Search sedang jalan, belum restart ≥7 hari, top 7 CPU & RAM, program autostart.
+- Kode: `ROPython/cek_laptop.py` (`diagnosa`) + `bot.py` (`p_cek_laptop`, jalan di thread). Tes lokal: `PYTHONIOENCODING=utf-8 python cek_laptop.py`.
