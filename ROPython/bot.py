@@ -1428,6 +1428,8 @@ class Bot:
                 except Exception:
                     self.log.exception("Error saat cek (bot tetap jalan)")
             interval = max(1, int(self.cfg.get("interval_detik", 2)))
+            if autoupdate.beban_cpu_tinggi():
+                interval = min(interval * 2, 6)  # hemat CPU saat laptop sedang berat
             self.bangun.wait(interval)
             self.bangun.clear()
 
@@ -1826,7 +1828,8 @@ class Bot:
         gif_bytes, r = hasil
         cap = (f"🎬 <b>{self.nama_akun(p)}</b>: {umum.fmt(r['awal'])} → <b>{umum.fmt(r['terbaik'])}</b> "
                f"({r['naik']:+.1f}%)".replace(".", ","))
-        self.kirim.tambah("gif", self.tg.kirim_animasi, chat_id, gif_bytes, cap, "progres_dps.gif")
+        ext = "mp4" if r.get("format") == "mp4" else "gif"
+        self.kirim.tambah("gif", self.tg.kirim_animasi, chat_id, gif_bytes, cap, f"progres_dps.{ext}")
 
     def p_story(self, chat_id, isi):
         """/story [nama/nomor] - poster vertikal 9:16 siap upload WA Status / TikTok / IG Story."""
@@ -1908,11 +1911,12 @@ class Bot:
             try:
                 g = visual.buat_gif(calon[0], calon[1], kaki)
                 if g:
-                    gif_bytes, _ = g
+                    gif_bytes, r_g = g
+                    ext = "mp4" if r_g.get("format") == "mp4" else "gif"
                     for cid in self.penerima:
                         self.kirim.tambah("tutor-gif", self.tg.kirim_animasi, cid, gif_bytes,
                                           f"🎬 Contoh <b>/gif</b> ({self.nama_akun(calon[1])}) — tinggal forward ke klien!",
-                                          "contoh_progres.gif")
+                                          f"contoh_progres.{ext}")
             except Exception:
                 self.log.exception("Gagal kirim contoh gif")
 
@@ -2756,14 +2760,19 @@ class Bot:
         if not isi:
             info = autoupdate.info_config(self.cfg)
             sha = autoupdate.sha_lokal()
+            st_boost = autoupdate.status_modul_boost()
+            aktif_b = [k for k, v in st_boost.items() if v]
+            sys_info = autoupdate.info_sistem()
             self.balas(chat_id,
                        "🔄 <b>Auto-Update GitHub</b>\n"
                        f"• Status: <b>{'AKTIF' if info['aktif'] and info['repo'] else 'MATI'}</b>\n"
                        f"• Repo: <code>{html.escape(info['repo'] or '(belum diatur)')}</code> (branch: <code>{html.escape(info['branch'])}</code>)\n"
                        f"• Token private: {'✅ terpasang' if info['token'] else '— (repo publik)'}\n"
                        f"• Cek tiap: {info['interval_menit']} menit\n"
-                       f"• Commit terakhir: <code>{html.escape(sha[:10] if sha else '-')}</code>\n\n"
-                       "Perintah:\n"
+                       f"• Commit terakhir: <code>{html.escape(sha[:10] if sha else '-')}</code>\n"
+                       f"• Modul boost: <code>{html.escape(', '.join(aktif_b) if aktif_b else 'belum ada')}</code>\n"
+                       + (f"• Kesehatan laptop: <code>{html.escape(sys_info)}</code>\n" if sys_info else "")
+                       + "\nPerintah:\n"
                        "• <code>/auto_update owner/repo</code> (atau + branch)\n"
                        "• <code>/auto_update token ghp_...</code> (untuk repo private)\n"
                        "• <code>/auto_update cek</code> (tarik update sekarang)\n"
@@ -3053,7 +3062,8 @@ class Bot:
         try:
             baru, msg = autoupdate.pasang_requirements(self.log, paksa=False)
             if baru:
-                for mod in (umum, ocr, layar, job):
+                import telegram_api
+                for mod in (umum, ocr, layar, job, autoupdate, telegram_api, visual, datagame):
                     fn = getattr(mod, "reset_cache_boost", None)
                     if fn:
                         fn()

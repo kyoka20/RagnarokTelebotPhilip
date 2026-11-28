@@ -326,7 +326,65 @@ _MODUL_BOOST = (
     ("WindowsCapture", "windows_capture"),
     ("RapidFuzz", "rapidfuzz"),
     ("orjson", "orjson"),
+    ("HTTP/2", "httpx"),
+    ("psutil", "psutil"),
+    ("FFmpeg", "imageio_ffmpeg"),
 )
+
+_psutil_mod = None
+_psutil_dicek = False
+_cpu_terakhir_t = 0.0
+_cpu_terakhir_v = 0.0
+
+
+def _psutil():
+    global _psutil_mod, _psutil_dicek
+    if not _psutil_dicek:
+        _psutil_dicek = True
+        try:
+            import psutil  # type: ignore
+            psutil.cpu_percent(interval=None)  # priming non-blocking
+            _psutil_mod = psutil
+        except Exception:
+            _psutil_mod = None
+    return _psutil_mod
+
+
+def reset_cache_boost() -> None:
+    global _psutil_dicek
+    _psutil_dicek = False
+
+
+def beban_cpu_tinggi(batas: float = 85.0) -> bool:
+    """True bila CPU laptop sedang tinggi (> batas%). Non-blocking, dicek maks tiap 5 detik."""
+    global _cpu_terakhir_t, _cpu_terakhir_v
+    ps = _psutil()
+    if ps is None:
+        return False
+    import time
+    sekarang = time.monotonic()
+    if sekarang - _cpu_terakhir_t >= 5.0:
+        try:
+            _cpu_terakhir_v = float(ps.cpu_percent(interval=None))
+            _cpu_terakhir_t = sekarang
+        except Exception:
+            return False
+    return _cpu_terakhir_v >= batas
+
+
+def info_sistem() -> str:
+    """Ringkasan singkat RAM bot & CPU/RAM laptop (memakai psutil bila terpasang)."""
+    ps = _psutil()
+    if ps is None:
+        return ""
+    try:
+        import os
+        ram_bot = ps.Process(os.getpid()).memory_info().rss / (1024 * 1024)
+        vm = ps.virtual_memory()
+        cpu = ps.cpu_percent(interval=None)
+        return f"RAM bot {ram_bot:.0f} MB | Laptop CPU {cpu:.0f}%, RAM {vm.percent:.0f}%"
+    except Exception:
+        return ""
 
 
 def status_modul_boost() -> dict[str, bool]:

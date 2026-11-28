@@ -6,6 +6,9 @@
 from __future__ import annotations
 
 import io
+import os
+import subprocess
+import tempfile
 from datetime import datetime
 
 from PIL import Image, ImageDraw
@@ -13,6 +16,76 @@ from PIL import Image, ImageDraw
 import catatan
 import rapor
 import umum
+
+_ffmpeg_exe: str | None = None
+_ffmpeg_dicek = False
+
+
+def _ffmpeg() -> str | None:
+    global _ffmpeg_exe, _ffmpeg_dicek
+    if not _ffmpeg_dicek:
+        _ffmpeg_dicek = True
+        try:
+            import imageio_ffmpeg  # type: ignore
+            _ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+        except Exception:
+            _ffmpeg_exe = None
+    return _ffmpeg_exe
+
+
+def reset_cache_boost() -> None:
+    global _ffmpeg_dicek
+    _ffmpeg_dicek = False
+
+
+def _simpan_mp4(frames_rgb: list[Image.Image], durations_ms: list[int], fps: int = 20) -> bytes | None:
+    """Encode frame RGB ke MP4 H.264 (tanpa suara) via imageio-ffmpeg.
+    5-10x lebih kecil & warna jauh lebih tajam daripada GIF 256 warna; di Telegram tetap auto-loop."""
+    exe = _ffmpeg()
+    if not exe or not frames_rgb:
+        return None
+    w, h = frames_rgb[0].size
+    # H.264 yuv420p butuh dimensi genap
+    w2, h2 = w - (w % 2), h - (h % 2)
+    fd, tmp_path = tempfile.mkstemp(suffix=".mp4", prefix="ro_anim_")
+    os.close(fd)
+    try:
+        cmd = [
+            exe, "-y",
+            "-f", "rawvideo", "-vcodec", "rawvideo",
+            "-pix_fmt", "rgb24", "-s", f"{w2}x{h2}", "-r", str(fps),
+            "-i", "pipe:0",
+            "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+            "-preset", "veryfast", "-crf", "24",
+            "-movflags", "+faststart",
+            tmp_path,
+        ]
+        proc = subprocess.Popen(
+            cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        assert proc.stdin is not None
+        for fr, dur in zip(frames_rgb, durations_ms):
+            if fr.size != (w2, h2):
+                fr = fr.crop((0, 0, w2, h2))
+            raw = fr.tobytes()
+            ulang = max(1, int(round(dur / (1000.0 / fps))))
+            for _ in range(ulang):
+                proc.stdin.write(raw)
+        proc.stdin.close()
+        proc.wait(timeout=30)
+        if proc.returncode == 0 and os.path.isfile(tmp_path):
+            data = open(tmp_path, "rb").read()
+            if len(data) > 512:
+                return data
+    except Exception:
+        return None
+    finally:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+    return None
 
 BG = rapor.BG
 KARTU = rapor.KARTU
@@ -124,25 +197,31 @@ def buat_gif(pid: str, profil: dict, catatan_kaki: str = "") -> tuple[bytes, dic
         fw_bar = max(12, int((bx1 - bx0) * max(0.06, progress)))
         d.rounded_rectangle((bx0, by0 + 44, bx0 + fw_bar, by0 + 58), 7, fill=col_bar)
 
-        return img.convert("P", palette=Image.ADAPTIVE, colors=256)
+        return img
 
-    # Susun 18 frame mulus (~4.5 detik loop)
-    frames.append(render_frame(0.0, "before"))
+    # Susun 14 frame mulus (~4.5 detik loop)
+    frames_rgb: list[Image.Image] = []
+    frames_rgb.append(render_frame(0.0, "before"))
     durations.append(1000)
 
     steps = 12
     for i in range(1, steps + 1):
         p = _ease_out(i / steps)
-        frames.append(render_frame(p, "boost"))
+        frames_rgb.append(render_frame(p, "boost"))
         durations.append(95)
 
-    frames.append(render_frame(1.0, "after"))
+    frames_rgb.append(render_frame(1.0, "after"))
     durations.append(2200)
 
+    mp4 = _simpan_mp4(frames_rgb, durations)
+    if mp4 is not None:
+        return mp4, {"awal": awal["dps"], "terbaik": terbaik["dps"], "naik": naik, "format": "mp4"}
+
+    frames = [fr.convert("P", palette=Image.ADAPTIVE, colors=256) for fr in frames_rgb]
     buf = io.BytesIO()
     frames[0].save(buf, format="GIF", save_all=True, append_images=frames[1:],
                    duration=durations, loop=0, optimize=True)
-    return buf.getvalue(), {"awal": awal["dps"], "terbaik": terbaik["dps"], "naik": naik}
+    return buf.getvalue(), {"awal": awal["dps"], "terbaik": terbaik["dps"], "naik": naik, "format": "gif"}
 
 
 # ------------------------------------------------------------ 2. /story (Poster 9:16 WA Status / TikTok)
