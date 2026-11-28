@@ -2704,6 +2704,14 @@ class Bot:
                 self.balas(chat_id, f"❌ Gagal menulis file ({html.escape(str(e))}). File lama dikembalikan.")
             return False
 
+        if "requirements.txt" in berkas:
+            try:
+                ok_req, msg_req = autoupdate.pasang_requirements(self.log, paksa=True)
+                if not ok_req:
+                    self.log.warning("Auto-install requirements saat update: %s", msg_req)
+            except Exception:
+                self.log.exception("Error tak terduga saat auto-install requirements")
+
         try:
             uji = subprocess.run([sys.executable, "-c", "import bot"], cwd=str(umum.FOLDER), capture_output=True,
                                  timeout=180, env={**os.environ, "PYTHONIOENCODING": "utf-8"},
@@ -3037,6 +3045,24 @@ class Bot:
 
     # ------------------------------------------------------------ mulai
 
+    def loop_pasang_paket(self) -> None:
+        """Satu kali saat startup: pastikan paket di requirements.txt (OpenCV, RapidOCR, dll.) terpasang."""
+        time.sleep(8)
+        if self.berhenti.is_set():
+            return
+        try:
+            baru, msg = autoupdate.pasang_requirements(self.log, paksa=False)
+            if baru:
+                for mod in (umum, ocr, layar, job):
+                    fn = getattr(mod, "reset_cache_boost", None)
+                    if fn:
+                        fn()
+                for cid in self.dev_ids:
+                    self.kirim.tambah("kabar boost", self.tg.kirim_teks, cid,
+                                      f"⚡ <b>Modul boost otomatis terpasang</b>: {html.escape(msg)}")
+        except Exception:
+            self.log.exception("Gagal cek/pasang paket boost saat startup")
+
     def jalankan(self) -> None:
         FILE_DIMATIKAN.unlink(missing_ok=True)  # dinyalakan lagi = penjaga boleh menjaga lagi
         self.kirim.start()
@@ -3045,6 +3071,7 @@ class Bot:
         threading.Thread(target=self.loop_harian, daemon=True, name="harian").start()
         threading.Thread(target=self.loop_auto_update, daemon=True, name="auto-update").start()
         threading.Thread(target=self.loop_sync_log, daemon=True, name="sync-log").start()
+        threading.Thread(target=self.loop_pasang_paket, daemon=True, name="pasang-paket").start()
         catatan.sesi_mulai(self.pid)
         # Menu "/" di Telegram = hanya perintah yang dipakai (yang lama ikut hilang dari menu).
         self.kirim.tambah("menu perintah", self.tg.panggil, "setMyCommands",

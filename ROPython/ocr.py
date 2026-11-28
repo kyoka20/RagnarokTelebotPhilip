@@ -14,14 +14,61 @@ import difflib
 import os
 import re
 import shutil
+import threading
 from dataclasses import dataclass
 
+import numpy as np
 from PIL import Image, ImageOps
 
 LABEL_TOTAL = "Total DMG"
 LABEL_REKOR = "Highest Solo DMG Record"
 VARIAN = ("asli", "kontras", "ambang")
 TESSERACT_UMUM = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+
+# ---------------------------------------------------------------- modul boost (lazy + fallback aman)
+
+_cv2_mod = None
+_cv2_dicek = False
+_rf_fuzz = None
+_rf_dicek = False
+_rapid_engine = None
+_rapid_rusak: str | None = None
+_rapid_lock = threading.Lock()
+
+
+def _cv2():
+    global _cv2_mod, _cv2_dicek
+    if not _cv2_dicek:
+        _cv2_dicek = True
+        try:
+            import cv2  # type: ignore
+            _cv2_mod = cv2
+        except Exception:
+            _cv2_mod = None
+    return _cv2_mod
+
+
+def _rasio_mirip(a: str, b: str) -> float:
+    """Skor kemiripan string 0.0–1.0: RapidFuzz (C++, 10-100x lebih cepat) -> fallback difflib."""
+    global _rf_fuzz, _rf_dicek
+    if not _rf_dicek:
+        _rf_dicek = True
+        try:
+            from rapidfuzz import fuzz  # type: ignore
+            _rf_fuzz = fuzz
+        except Exception:
+            _rf_fuzz = None
+    if _rf_fuzz is not None:
+        return _rf_fuzz.ratio(a, b) / 100.0
+    return difflib.SequenceMatcher(None, a, b).ratio()
+
+
+def reset_cache_boost() -> None:
+    """Reset cache deteksi modul boost setelah auto-install requirements selesai."""
+    global _cv2_dicek, _rf_dicek, _rapid_rusak
+    _cv2_dicek = False
+    _rf_dicek = False
+    _rapid_rusak = None
 
 
 class OcrError(Exception):
@@ -107,12 +154,31 @@ def _mirip_angka(teks: str) -> bool:
 # ---------------------------------------------------------------- preprocessing
 
 def siapkan_gambar(img: Image.Image, varian: str, perbesar: float = 2, ambang: int = 190) -> Image.Image:
-    """Perbesar + (opsional) grayscale/threshold supaya tulisan lebih jelas."""
+    """Perbesar + (opsional) grayscale/threshold supaya tulisan lebih jelas.
+    Memakai OpenCV (C++/SIMD) bila terpasang (5-15x lebih cepat), fallback ke Pillow."""
     w, h = img.size
     skala = max(1.0, float(perbesar))
     skala = min(skala, 4000 / max(w, h))  # jangan terlalu besar
+    nw, nh = int(w * skala), int(h * skala)
+    cv2 = _cv2()
+    if cv2 is not None:
+        arr = np.asarray(img.convert("RGB"))
+        if skala > 1.01:
+            interp = cv2.INTER_CUBIC if skala <= 2.5 else cv2.INTER_LINEAR
+            arr = cv2.resize(arr, (nw, nh), interpolation=interp)
+        if varian == "asli":
+            return Image.fromarray(arr, mode="RGB")
+        abu = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
+        lo, hi = int(abu.min()), int(abu.max())
+        if hi > lo:
+            abu = cv2.convertScaleAbs(abu, alpha=255.0 / (hi - lo), beta=-lo * 255.0 / (hi - lo))
+        if varian == "kontras":
+            return Image.fromarray(abu, mode="L")
+        _, biner = cv2.threshold(abu, ambang - 1, 255, cv2.THRESH_BINARY_INV)
+        return Image.fromarray(biner, mode="L")
+
     if skala > 1.01:
-        img = img.resize((int(w * skala), int(h * skala)), Image.LANCZOS)
+        img = img.resize((nw, nh), Image.LANCZOS)
     if varian == "asli":
         return img.convert("RGB")
     abu = ImageOps.autocontrast(ImageOps.grayscale(img))
@@ -182,9 +248,84 @@ def _ocr_tesseract(img: Image.Image, path_config: str) -> list[Kata]:
     return kata
 
 
-def _jalankan_mesin(img: Image.Image, cfg_ocr: dict) -> tuple[list[Kata], str]:
+def _ocr_rapid(img: Image.Image) -> list[Kata]:
+    """OCR memakai RapidOCR (PaddleOCR v4 via ONNX Runtime, lazy-loaded saat dibutuhkan)."""
+    global _rapid_engine, _rapid_rusak
+    if _rapid_rusak is not None:
+        raise OcrError(_rapid_rusak)
+    with _rapid_lock:
+        if _rapid_engine is None:
+            try:
+                try:
+                    from rapidocr_onnxruntime import RapidOCR  # type: ignore
+                except ImportError:
+                    from rapidocr import RapidOCR  # type: ignore
+                _rapid_engine = RapidOCR()
+            except Exception as e:
+                _rapid_rusak = f"RapidOCR tidak tersedia: {e}"
+                raise OcrError(_rapid_rusak) from e
+    rgb = np.asarray(img.convert("RGB"))
+    cv2 = _cv2()
+    bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR) if cv2 is not None else rgb[..., ::-1].copy()
+    keluaran = _rapid_engine(bgr)
+    pasangan: list[tuple] = []
+    if hasattr(keluaran, "boxes") and hasattr(keluaran, "txts"):
+        boxes = keluaran.boxes if keluaran.boxes is not None else []
+        txts = keluaran.txts if keluaran.txts is not None else []
+        for b, t in zip(boxes, txts):
+            pasangan.append((b, str(t)))
+    else:
+        hasil = keluaran[0] if isinstance(keluaran, tuple) else keluaran
+        for item in (hasil or []):
+            if not item or len(item) < 2:
+                continue
+            # Format standar rapidocr_onnxruntime: [box, text, score]; cadangan: [text, score, box]
+            if isinstance(item[0], str) and len(item) >= 3:
+                pasangan.append((item[2], item[0]))
+            else:
+                pasangan.append((item[0], str(item[1])))
+    kata: list[Kata] = []
+    for box, teks in pasangan:
+        teks = teks.strip()
+        if not teks:
+            continue
+        xs = [float(p[0]) for p in box]
+        ys = [float(p[1]) for p in box]
+        x0, x1 = min(xs), max(xs)
+        y0, y1 = min(ys), max(ys)
+        w_box, h_box = max(1.0, x1 - x0), max(1.0, y1 - y0)
+        # RapidOCR mengembalikan per baris; pecah jadi per kata secara proporsional
+        # agar parser label+angka (_semua_label, bacabuild, _cari_nick) bekerja identik dengan WinOCR.
+        bagian = teks.split()
+        if len(bagian) == 1:
+            kata.append(Kata(bagian[0], x0, y0, w_box, h_box))
+        else:
+            total_len = max(1, len(teks))
+            pos = 0
+            for b in bagian:
+                idx = teks.find(b, pos)
+                if idx < 0:
+                    idx = pos
+                wx = x0 + (idx / total_len) * w_box
+                ww = max(1.0, (len(b) / total_len) * w_box)
+                kata.append(Kata(b, wx, y0, ww, h_box))
+                pos = idx + len(b)
+    return kata
+
+
+def _jalankan_mesin(img: Image.Image, cfg_ocr: dict, prioritas: str = "cepat") -> tuple[list[Kata], str]:
+    """Jalankan mesin OCR terbaik.
+    prioritas='cepat'  : WinOCR dulu (ringan saat standby) -> RapidOCR -> Tesseract.
+    prioritas='akurat' : RapidOCR dulu (paling akurat untuk font game/Detailed Stats) -> WinOCR -> Tesseract."""
     global _windows_rusak
     mesin = str(cfg_ocr.get("mesin", "auto")).lower()
+    if mesin == "rapid":
+        return _ocr_rapid(img), "rapidocr"
+    if mesin == "auto" and prioritas == "akurat" and _rapid_rusak is None:
+        try:
+            return _ocr_rapid(img), "rapidocr"
+        except Exception:
+            pass
     if mesin in ("auto", "windows") and _windows_rusak is None:
         try:
             return _ocr_windows(img, cfg_ocr.get("bahasa", "en-US")), "windows"
@@ -194,6 +335,11 @@ def _jalankan_mesin(img: Image.Image, cfg_ocr: dict) -> tuple[list[Kata], str]:
             _windows_rusak = str(e)
     if mesin == "windows":
         raise OcrError(f"OCR Windows gagal: {_windows_rusak}")
+    if mesin == "auto" and _rapid_rusak is None:
+        try:
+            return _ocr_rapid(img), "rapidocr"
+        except Exception:
+            pass
     try:
         return _ocr_tesseract(img, cfg_ocr.get("tesseract_path", "")), "tesseract"
     except OcrError as e:
@@ -251,7 +397,7 @@ def _semua_label(baris: list[list[Kata]], label: str) -> list[tuple[int | None, 
                 if not teks:
                     continue
                 skor = 1.0 if target in teks and len(teks) <= len(target) + 12 else \
-                    difflib.SequenceMatcher(None, target, teks).ratio()
+                    _rasio_mirip(target, teks)
                 if skor < 0.85:  # 0.75 terlalu longgar: "DMG Record" sempat dikira "DMG Per Second"
                     continue
                 # Angka: kata-kata angka yang menyambung tepat setelah label.
@@ -330,12 +476,14 @@ def tafsir(kata: list[Kata], label: str) -> HasilBaca:
     return hasil
 
 
-def baca_hasil(img: Image.Image, label: str, cfg_ocr: dict, varian_dicoba=VARIAN) -> HasilBaca:
+def baca_hasil(img: Image.Image, label: str, cfg_ocr: dict, varian_dicoba=VARIAN,
+               prioritas: str = "cepat") -> HasilBaca:
     """Fungsi utama: gambar -> HasilBaca. Mencoba beberapa cara preprocessing."""
     terbaik = HasilBaca()
     for varian in varian_dicoba:
         siap = siapkan_gambar(img, varian, cfg_ocr.get("perbesar", 2), cfg_ocr.get("ambang", 190))
-        kata, mesin = _jalankan_mesin(siap, cfg_ocr)
+        prio = prioritas if varian == "asli" else "akurat"
+        kata, mesin = _jalankan_mesin(siap, cfg_ocr, prioritas=prio)
         hasil = tafsir(kata, label)
         hasil.mesin, hasil.varian = mesin, varian
         if hasil.kotak:
@@ -381,7 +529,8 @@ def cari_di_layar(img: Image.Image, label: str, cfg_ocr: dict) -> HasilBaca:
     """
     terbaik = HasilBaca()
     for besar in (1, 2):
-        hasil = baca_hasil(img, label, dict(cfg_ocr, perbesar=besar), ("asli",))
+        prio = "cepat" if besar == 1 else "akurat"
+        hasil = baca_hasil(img, label, dict(cfg_ocr, perbesar=besar), ("asli",), prioritas=prio)
         if _yakin(hasil):
             return hasil
         if _lebih_baik(hasil, terbaik):
@@ -392,11 +541,11 @@ def cari_di_layar(img: Image.Image, label: str, cfg_ocr: dict) -> HasilBaca:
             if tidak_ada or meteran:
                 break
     if terbaik.panel and terbaik.kotak:
-        # Panel ketemu tapi angkanya meragukan: baca ulang bagian panel saja dengan cara lain.
+        # Panel ketemu tapi angkanya meragukan: baca ulang bagian panel saja dengan cara paling akurat.
         x0, y0, x1, y1 = terbaik.kotak
         kiri, atas = max(0, x0 - 50), max(0, y0 - 35)
         potong = img.crop((kiri, atas, min(img.width, x1 + 50), min(img.height, y1 + 35)))
-        hasil = baca_hasil(potong, label, dict(cfg_ocr, perbesar=3), VARIAN)
+        hasil = baca_hasil(potong, label, dict(cfg_ocr, perbesar=3), VARIAN, prioritas="akurat")
         if _lebih_baik(hasil, terbaik):
             hasil.kotak = terbaik.kotak
             terbaik = hasil

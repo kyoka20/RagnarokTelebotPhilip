@@ -167,6 +167,56 @@ def fmt_selisih(n: int) -> str:
     return ("+" if n >= 0 else "-") + fmt(abs(n))
 
 
+# ------------------------------------------------------------ JSON cepat (orjson + fallback json)
+
+_orjson_mod = None
+_orjson_dicek = False
+
+
+def _orjson():
+    global _orjson_mod, _orjson_dicek
+    if not _orjson_dicek:
+        _orjson_dicek = True
+        try:
+            import orjson  # type: ignore
+            _orjson_mod = orjson
+        except Exception:
+            _orjson_mod = None
+    return _orjson_mod
+
+
+def reset_cache_boost() -> None:
+    """Dipanggil setelah auto-install paket selesai agar modul baru langsung terdeteksi."""
+    global _orjson_dicek
+    _orjson_dicek = False
+
+
+def json_loads(data: str | bytes):
+    """Parse JSON cepat memakai orjson (Rust) bila terpasang, fallback ke json bawaan."""
+    oj = _orjson()
+    if oj is not None:
+        if isinstance(data, str) and data.startswith("\ufeff"):
+            data = data.lstrip("\ufeff")
+        return oj.loads(data)
+    if isinstance(data, bytes):
+        data = data.decode("utf-8-sig")
+    elif data.startswith("\ufeff"):
+        data = data.lstrip("\ufeff")
+    return json.loads(data)
+
+
+def json_dumps(obj, indent: bool = False) -> str:
+    """Serialize JSON cepat memakai orjson bila terpasang, fallback ke json bawaan."""
+    oj = _orjson()
+    if oj is not None:
+        try:
+            opt = oj.OPT_INDENT_2 if indent else 0
+            return oj.dumps(obj, option=opt).decode("utf-8")
+        except TypeError:
+            pass
+    return json.dumps(obj, indent=2 if indent else None, ensure_ascii=False)
+
+
 class _SaringToken(logging.Filter):
     """Jaga-jaga: token bot tidak boleh ikut tertulis di log."""
 

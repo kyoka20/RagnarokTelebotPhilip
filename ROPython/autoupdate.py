@@ -12,9 +12,14 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import importlib
+import importlib.util
 import io
 import json
 import re
+import shutil
+import subprocess
+import sys
 import zipfile
 from datetime import datetime
 from pathlib import Path
@@ -25,6 +30,7 @@ import requests
 import umum
 
 FILE_SHA = umum.FOLDER / "log" / "auto_update_sha.txt"
+FILE_REQ_SHA = umum.FOLDER / "log" / "requirements_sha.txt"
 DILARANG_EKSTRA = {"4_jalankan_bot.bat", "4b_jalankan_bot_minimize.bat", "jaga_bot.ps1", "jaga_bot_diam.vbs"}
 # `database/` & `database_ikon/` diunduh sendiri oleh bot di laptop (datagame.perbarui, tiap hari).
 # Versi di GitHub bisa lebih tua -> jangan sampai menimpa database yang lebih baru di laptop.
@@ -310,3 +316,81 @@ def kirim_log(repo: str, branch: str, token: str, ringkas_profil: dict[str, Any]
 
     _SYNC_SIG_TERAKHIR = sig_baru
     return terkirim
+
+
+# ---------------------------------------------------------------- Auto-install paket (requirements.txt)
+
+_MODUL_BOOST = (
+    ("OpenCV", "cv2"),
+    ("RapidOCR", "rapidocr_onnxruntime"),
+    ("WindowsCapture", "windows_capture"),
+    ("RapidFuzz", "rapidfuzz"),
+    ("orjson", "orjson"),
+)
+
+
+def status_modul_boost() -> dict[str, bool]:
+    """Cek modul akselerasi Tier S/A mana saja yang sudah terpasang di environment aktif."""
+    importlib.invalidate_caches()
+    hasil: dict[str, bool] = {}
+    for label, nama_mod in _MODUL_BOOST:
+        hasil[label] = importlib.util.find_spec(nama_mod) is not None
+    return hasil
+
+
+def pasang_requirements(log=None, paksa: bool = False) -> tuple[bool, str]:
+    """Pasang paket di requirements.txt otomatis bila berubah (atau belum pernah dipasang).
+
+    Aman & non-destruktif: pakai pip bawaan venv, fallback ke `uv pip install` (sama dengan 1_install.bat).
+    Mengembalikan (ada_install_baru, ringkasan_teks).
+    """
+    req = umum.FOLDER / "requirements.txt"
+    if not req.exists():
+        return False, "requirements.txt tidak ditemukan"
+    isi = req.read_bytes()
+    sha_baru = hashlib.sha1(isi).hexdigest()
+    sha_lama = ""
+    try:
+        sha_lama = FILE_REQ_SHA.read_text(encoding="utf-8").strip()
+    except OSError:
+        pass
+    if not paksa and sha_lama == sha_baru:
+        return False, "sudah sesuai"
+
+    cflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    cmd = None
+    try:
+        cek_pip = subprocess.run([sys.executable, "-m", "pip", "--version"],
+                                 capture_output=True, timeout=20, creationflags=cflags)
+        if cek_pip.returncode == 0:
+            cmd = [sys.executable, "-m", "pip", "install", "--disable-pip-version-check",
+                   "--no-input", "-r", str(req)]
+    except Exception:
+        pass
+    if cmd is None:
+        uv_exe = shutil.which("uv")
+        if uv_exe:
+            cmd = [uv_exe, "pip", "install", "--python", sys.executable, "-r", str(req)]
+    if cmd is None:
+        return False, "pip dan uv tidak ditemukan"
+
+    if log:
+        log.info("Memasang paket baru dari requirements.txt (%s)...", sha_baru[:8])
+    try:
+        r = subprocess.run(cmd, cwd=str(umum.FOLDER), capture_output=True, timeout=360,
+                           creationflags=cflags)
+    except Exception as e:
+        return False, f"gagal menjalankan installer: {e}"
+    if r.returncode != 0:
+        err = (r.stderr or r.stdout or b"").decode("utf-8", "replace").strip()
+        return False, f"install gagal (kode {r.returncode}): {err[-400:]}"
+
+    importlib.invalidate_caches()
+    FILE_REQ_SHA.parent.mkdir(parents=True, exist_ok=True)
+    FILE_REQ_SHA.write_text(sha_baru, encoding="utf-8")
+    st = status_modul_boost()
+    aktif = [k for k, v in st.items() if v]
+    ringkas = f"paket terpasang ({', '.join(aktif) if aktif else 'dasar'})"
+    if log:
+        log.info("Auto-install requirements.txt selesai: %s", ringkas)
+    return True, ringkas

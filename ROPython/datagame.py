@@ -68,7 +68,7 @@ def versi_situs(sesi=None) -> str:
 
 def info_lokal() -> dict:
     try:
-        return json.loads(FILE_VERSI.read_text(encoding="utf-8"))
+        return umum.json_loads(FILE_VERSI.read_bytes())
     except Exception:
         return {}
 
@@ -178,7 +178,7 @@ def enchant_lokal(gabung: bool = True) -> dict:
     """Database enchant yang dipelajari dari layar game (set, gem per level). Boleh diedit manual.
     gabung=True: ikut sertakan hasil belajar otomatis bot (database_lokal/enchant_belajar.json)."""
     try:
-        db = json.loads(FILE_ENCHANT.read_text(encoding="utf-8"))
+        db = umum.json_loads(FILE_ENCHANT.read_bytes())
     except Exception:
         db = {"gem": {}, "set": {}}
     if not gabung:
@@ -221,7 +221,7 @@ def _muat(nama: str):
             _unduh_gem(requests.Session(), info_lokal().get("versi", ""), FOLDER_DB)
         if not f.exists():
             raise DatabaseError("Database belum diunduh. Jalankan 8_perbarui_database.bat")
-        _cache[nama] = json.loads(f.read_text(encoding="utf-8"))
+        _cache[nama] = umum.json_loads(f.read_bytes())
     return _cache[nama]
 
 
@@ -230,7 +230,7 @@ def _skill_semua() -> list[dict]:
     if "_skill" not in _cache:
         hasil = []
         for f in sorted((FOLDER_DB / "skill").glob("*.json")):
-            j = json.loads(f.read_text(encoding="utf-8"))
+            j = umum.json_loads(f.read_bytes())
             for kel in ("skills", "unique_skills"):
                 isi = j.get(kel) or {}
                 for sid, s in (isi.items() if isinstance(isi, dict) else enumerate(isi)):
