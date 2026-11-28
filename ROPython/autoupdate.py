@@ -387,6 +387,77 @@ def info_sistem() -> str:
         return ""
 
 
+def diagnosa_laptop() -> str:
+    """Cek siapa pelaku pemakan CPU & RAM terbesar di laptop (bot kita vs aplikasi lain)."""
+    import os
+    import time
+    ps = _psutil()
+    if ps is None:
+        return ("⚠️ Modul <code>psutil</code> belum selesai terpasang.\n"
+                "Tunggu ±1–2 menit (atau cek <code>/auto_update</code>) lalu jalankan <code>/cek_laptop</code> lagi.")
+    pid_bot = os.getpid()
+    n_cpu = ps.cpu_count(logical=True) or 1
+    procs = []
+    for p in ps.process_iter(["pid", "name"]):
+        try:
+            p.cpu_percent(interval=None)
+            procs.append(p)
+        except Exception:
+            pass
+    ps.cpu_percent(interval=None)
+    time.sleep(1.0)
+    cpu_total = ps.cpu_percent(interval=None)
+    vm = ps.virtual_memory()
+    bot_cpu, bot_ram = 0.0, 0.0
+    daftar = []
+    ada_pip = False
+    for p in procs:
+        try:
+            nama = (p.info.get("name") or "?").strip()
+            if nama.lower() in ("system idle process", "idle"):
+                continue
+            c = p.cpu_percent(interval=None) / n_cpu
+            m = p.memory_info().rss / (1024 * 1024)
+            if p.pid == pid_bot:
+                bot_cpu, bot_ram = c, m
+            if any(k in nama.lower() for k in ("pip", "uv.exe")):
+                ada_pip = True
+            daftar.append((c, m, p.pid, nama))
+        except Exception:
+            pass
+    # Gabungkan proses dengan nama sama (mis. Chrome banyak tab)
+    gabung: dict[str, list[float]] = {}
+    for c, m, pid, nama in daftar:
+        k = f"{nama} (BOT KITA)" if pid == pid_bot else nama
+        g = gabung.setdefault(k, [0.0, 0.0, 0])
+        g[0] += c
+        g[1] += m
+        g[2] += 1
+    top_cpu = sorted(gabung.items(), key=lambda x: -x[1][0])[:6]
+    top_ram = sorted(gabung.items(), key=lambda x: -x[1][1])[:6]
+    vonis = ("✅ <b>Bot kita BUKAN pelakunya</b> (ringan)."
+             if bot_cpu < 10 and bot_ram < 450
+             else "⚠️ <b>Bot kita sedang lumayan berat</b> — cek detail di bawah.")
+    baris = [
+        "🩺 <b>DIAGNOSA LAPTOP</b>",
+        f"• CPU total: <b>{cpu_total:.0f}%</b> | RAM: <b>{vm.used / (1024**3):.1f} / {vm.total / (1024**3):.1f} GB ({vm.percent:.0f}%)</b>",
+        f"• Bot kita: CPU <b>{bot_cpu:.1f}%</b> | RAM <b>{bot_ram:.0f} MB</b>",
+        f"• Vonis: {vonis}",
+    ]
+    if ada_pip:
+        baris.append("• ⏳ <i>Catatan: pip/uv sedang install paket update di belakang layar (sementara bikin berat 1–2 menit).</i>")
+    baris.append("\n🔥 <b>Top Pemakan CPU:</b>")
+    import html as _html
+    for k, (c, m, cnt) in top_cpu:
+        t_cnt = f" ×{int(cnt)}" if cnt > 1 else ""
+        baris.append(f"• {_html.escape(k)}{t_cnt}: <b>{c:.1f}% CPU</b> ({m:.0f} MB)")
+    baris.append("\n🧠 <b>Top Pemakan RAM:</b>")
+    for k, (c, m, cnt) in top_ram:
+        t_cnt = f" ×{int(cnt)}" if cnt > 1 else ""
+        baris.append(f"• {_html.escape(k)}{t_cnt}: <b>{m:.0f} MB</b> ({c:.1f}% CPU)")
+    return "\n".join(baris)
+
+
 def status_modul_boost() -> dict[str, bool]:
     """Cek modul akselerasi Tier S/A mana saja yang sudah terpasang di environment aktif."""
     importlib.invalidate_caches()

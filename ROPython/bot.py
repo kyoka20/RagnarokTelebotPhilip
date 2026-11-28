@@ -1552,6 +1552,7 @@ class Bot:
             "/batu": self.p_batu, "/saran_batu": self.p_batu, "/gem_saran": self.p_batu,
             "/record_train": self.p_rekam, "/rekam": self.p_rekam, "/train": self.p_rekam,
             "/stop_train": self.p_rekam_stop, "/rekam_stop": self.p_rekam_stop,
+            "/cek_laptop": self.p_cek_laptop, "/cek_lemot": self.p_cek_laptop,
         }.get(perintah)
         if fungsi is None:
             self.balas(chat_id, "Perintah tidak dikenal. Ketik /help")
@@ -1569,6 +1570,16 @@ class Bot:
             self.balas(chat_id, f"Screenshot gagal: {html.escape(str(e))}")
             return
         self.siarkan_foto(f"🖥 Layar penuh - {datetime.now():%d/%m/%Y %H:%M:%S}", [("layar.jpg", foto)], [chat_id])
+
+    def p_cek_laptop(self, chat_id, isi):
+        """/cek_laptop - cek siapa pemakan CPU & RAM terbesar di laptop (bot kita vs aplikasi lain)."""
+        self.balas(chat_id, "🩺 Mengecek CPU & RAM laptop (1 detik)...")
+        def _kerja():
+            try:
+                self.balas(chat_id, autoupdate.diagnosa_laptop())
+            except Exception as e:
+                self.balas(chat_id, f"❌ Gagal diagnosa laptop: {html.escape(str(e))}")
+        threading.Thread(target=_kerja, daemon=True, name="cek-laptop").start()
 
     def p_status(self, chat_id, isi):
         with self.kunci:

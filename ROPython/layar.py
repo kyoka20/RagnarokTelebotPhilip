@@ -161,9 +161,17 @@ def _judul_hwnd(hwnd: int) -> str:
     return buf.value.strip()
 
 
+_wgc_gagal_sampai = 0.0
+
+
 def _ambil_jendela_wgc(hwnd: int, timeout: float = 0.45) -> Image.Image | None:
-    """Ambil gambar jendela langsung dari GPU lewat Windows Graphics Capture (windows-capture,
-    API modern yang sama dengan OBS Studio). Cepat, hemat CPU, tembus jendela yang menutupi."""
+    """Cadangan GPU via Windows Graphics Capture (windows-capture) bila PrintWindow hitam.
+    Tidak dipakai sebagai loop 1 detik utama agar tidak bikin-hancurkan sesi D3D11/DWM berulang."""
+    global _wgc_gagal_sampai
+    import time
+    sekarang = time.monotonic()
+    if sekarang < _wgc_gagal_sampai:
+        return None
     WCap = _wcap()
     if WCap is None:
         return None
@@ -193,8 +201,10 @@ def _ambil_jendela_wgc(hwnd: int, timeout: float = 0.45) -> Image.Image | None:
         except Exception:
             pass
     except Exception:
+        _wgc_gagal_sampai = sekarang + 15.0
         return None
     if not hasil:
+        _wgc_gagal_sampai = sekarang + 10.0
         return None
     arr = hasil[0]
     if arr.ndim != 3 or arr.shape[2] < 3 or arr.shape[0] < 50 or arr.shape[1] < 50:
@@ -209,11 +219,9 @@ def _ambil_jendela_wgc(hwnd: int, timeout: float = 0.45) -> Image.Image | None:
 
 
 def ambil_jendela(hwnd: int) -> Image.Image | None:
-    """Ambil gambar ISI jendela game langsung dari Windows: utamakan Windows Graphics Capture
-    (GPU, seperti OBS modern), fallback ke PrintWindow GDI. Tetap kelihatan walau ketutup jendela lain."""
-    img_wgc = _ambil_jendela_wgc(hwnd)
-    if img_wgc is not None:
-        return img_wgc
+    """Ambil gambar ISI jendela game langsung dari Windows: utamakan PrintWindow GDI
+    (1x syscall ringan, tidak bikin sesi GPU berulang tiap detik), fallback ke Windows Graphics
+    Capture (windows-capture) bila PrintWindow hasilnya hitam."""
     import ctypes
     from ctypes import wintypes
     u, g = ctypes.windll.user32, ctypes.windll.gdi32
@@ -260,7 +268,9 @@ def ambil_jendela(hwnd: int) -> Image.Image | None:
         g.DeleteDC(mdc)
         u.ReleaseDC(hwnd, hdc)
     img = Image.frombuffer("RGB", (w, h), buf, "raw", "BGRX", 0, 1).copy()
-    return None if gelap(img) else img
+    if not gelap(img):
+        return img
+    return _ambil_jendela_wgc(hwnd)
 
 
 def game_di_depan(judul: str) -> bool:

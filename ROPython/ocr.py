@@ -256,11 +256,15 @@ def _ocr_rapid(img: Image.Image) -> list[Kata]:
     with _rapid_lock:
         if _rapid_engine is None:
             try:
+                os.environ.setdefault("OMP_NUM_THREADS", "2")
                 try:
                     from rapidocr_onnxruntime import RapidOCR  # type: ignore
                 except ImportError:
                     from rapidocr import RapidOCR  # type: ignore
-                _rapid_engine = RapidOCR()
+                try:
+                    _rapid_engine = RapidOCR(intra_op_num_threads=2, inter_op_num_threads=1)
+                except TypeError:
+                    _rapid_engine = RapidOCR()
             except Exception as e:
                 _rapid_rusak = f"RapidOCR tidak tersedia: {e}"
                 raise OcrError(_rapid_rusak) from e
