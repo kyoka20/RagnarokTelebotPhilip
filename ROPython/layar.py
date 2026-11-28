@@ -2,57 +2,9 @@
 from __future__ import annotations
 
 import io
-import threading
 
 import mss
-import numpy as np
 from PIL import Image, ImageChops, ImageStat
-
-# ---------------------------------------------------------------- modul boost (lazy + fallback aman)
-
-_tls = threading.local()
-_cv2_mod = None
-_cv2_dicek = False
-_wcap_cls = None
-_wcap_dicek = False
-
-
-def _sct():
-    """Reuse satu instance mss per thread (lebih cepat daripada buat ulang tiap screenshot)."""
-    s = getattr(_tls, "sct", None)
-    if s is None:
-        s = _tls.sct = mss.mss()
-    return s
-
-
-def _cv2():
-    global _cv2_mod, _cv2_dicek
-    if not _cv2_dicek:
-        _cv2_dicek = True
-        try:
-            import cv2  # type: ignore
-            _cv2_mod = cv2
-        except Exception:
-            _cv2_mod = None
-    return _cv2_mod
-
-
-def _wcap():
-    global _wcap_cls, _wcap_dicek
-    if not _wcap_dicek:
-        _wcap_dicek = True
-        try:
-            from windows_capture import WindowsCapture  # type: ignore
-            _wcap_cls = WindowsCapture
-        except Exception:
-            _wcap_cls = None
-    return _wcap_cls
-
-
-def reset_cache_boost() -> None:
-    global _cv2_dicek, _wcap_dicek
-    _cv2_dicek = False
-    _wcap_dicek = False
 
 
 def _ke_pil(tangkapan) -> Image.Image:
@@ -62,19 +14,21 @@ def _ke_pil(tangkapan) -> Image.Image:
 def ambil_area(area: dict) -> Image.Image:
     """Screenshot kotak area saja. Koordinat = piksel asli di seluruh desktop."""
     kotak = {k: int(area[k]) for k in ("left", "top", "width", "height")}
-    return _ke_pil(_sct().grab(kotak))
+    with mss.mss() as sct:
+        return _ke_pil(sct.grab(kotak))
 
 
 def ambil_semua_monitor():
     """Screenshot gabungan semua monitor. Mengembalikan (gambar, left, top)."""
-    sct = _sct()
-    m = sct.monitors[0]
-    return _ke_pil(sct.grab(m)), m["left"], m["top"]
+    with mss.mss() as sct:
+        m = sct.monitors[0]
+        return _ke_pil(sct.grab(m)), m["left"], m["top"]
 
 
 def area_semua_monitor() -> dict:
-    m = _sct().monitors[0]
-    return {k: m[k] for k in ("left", "top", "width", "height")}
+    with mss.mss() as sct:
+        m = sct.monitors[0]
+        return {k: m[k] for k in ("left", "top", "width", "height")}
 
 
 def ambil_layar_penuh(area: dict | None = None) -> Image.Image:
@@ -82,17 +36,17 @@ def ambil_layar_penuh(area: dict | None = None) -> Image.Image:
 
     Kalau area belum diketahui, semua monitor diambil sekaligus.
     """
-    sct = _sct()
-    daftar = sct.monitors[1:] or sct.monitors
-    pilih = sct.monitors[0]
-    if area:
-        cx = area["left"] + area["width"] // 2
-        cy = area["top"] + area["height"] // 2
-        for m in daftar:
-            if m["left"] <= cx < m["left"] + m["width"] and m["top"] <= cy < m["top"] + m["height"]:
-                pilih = m
-                break
-    return _ke_pil(sct.grab(pilih))
+    with mss.mss() as sct:
+        daftar = sct.monitors[1:] or sct.monitors
+        pilih = sct.monitors[0]
+        if area:
+            cx = area["left"] + area["width"] // 2
+            cy = area["top"] + area["height"] // 2
+            for m in daftar:
+                if m["left"] <= cx < m["left"] + m["width"] and m["top"] <= cy < m["top"] + m["height"]:
+                    pilih = m
+                    break
+        return _ke_pil(sct.grab(pilih))
 
 
 # ------------------------------------------------------------------ jendela game
@@ -151,77 +105,11 @@ def jendela_game(judul: str) -> list[tuple[int, dict]]:
     return hasil
 
 
-def _judul_hwnd(hwnd: int) -> str:
-    ctypes, _, u = _user32()
-    n = u.GetWindowTextLengthW(hwnd)
-    if n <= 0:
-        return ""
-    buf = ctypes.create_unicode_buffer(n + 1)
-    u.GetWindowTextW(hwnd, buf, n + 1)
-    return buf.value.strip()
-
-
-_wgc_gagal_sampai = 0.0
-
-
-def _ambil_jendela_wgc(hwnd: int, timeout: float = 0.45) -> Image.Image | None:
-    """Cadangan GPU via Windows Graphics Capture (windows-capture) bila PrintWindow hitam.
-    Tidak dipakai sebagai loop 1 detik utama agar tidak bikin-hancurkan sesi D3D11/DWM berulang."""
-    global _wgc_gagal_sampai
-    import time
-    sekarang = time.monotonic()
-    if sekarang < _wgc_gagal_sampai:
-        return None
-    WCap = _wcap()
-    if WCap is None:
-        return None
-    judul = _judul_hwnd(hwnd)
-    if not judul:
-        return None
-    hasil: list[np.ndarray] = []
-    selesai = threading.Event()
-    try:
-        cap = WCap(cursor_capture=False, draw_border=False, window_name=judul)
-
-        @cap.event
-        def on_frame_arrived(frame, capture_control):
-            if not selesai.is_set():
-                hasil.append(np.array(frame.frame_buffer, copy=True))
-                selesai.set()
-            capture_control.stop()
-
-        @cap.event
-        def on_closed():
-            selesai.set()
-
-        kontrol = cap.start_free_threaded()
-        selesai.wait(timeout)
-        try:
-            kontrol.stop()
-        except Exception:
-            pass
-    except Exception:
-        _wgc_gagal_sampai = sekarang + 15.0
-        return None
-    if not hasil:
-        _wgc_gagal_sampai = sekarang + 10.0
-        return None
-    arr = hasil[0]
-    if arr.ndim != 3 or arr.shape[2] < 3 or arr.shape[0] < 50 or arr.shape[1] < 50:
-        return None
-    cv2 = _cv2()
-    if cv2 is not None:
-        rgb = cv2.cvtColor(arr, cv2.COLOR_BGRA2RGB if arr.shape[2] == 4 else cv2.COLOR_BGR2RGB)
-    else:
-        rgb = arr[..., [2, 1, 0]]
-    img = Image.fromarray(rgb, mode="RGB")
-    return None if gelap(img) else img
-
-
 def ambil_jendela(hwnd: int) -> Image.Image | None:
-    """Ambil gambar ISI jendela game langsung dari Windows: utamakan PrintWindow GDI
-    (1x syscall ringan, tidak bikin sesi GPU berulang tiap detik), fallback ke Windows Graphics
-    Capture (windows-capture) bila PrintWindow hasilnya hitam."""
+    """Ambil gambar ISI jendela game langsung dari Windows (PrintWindow), seperti "Window
+    Capture" di OBS. Tetap kelihatan walaupun jendela game ketutup Telegram/WhatsApp/Chrome.
+    Hanya MEMINTA gambar, tidak mengirim input apa pun ke game.
+    Mengembalikan None kalau tidak bisa (hasilnya hitam) -> pakai screenshot layar biasa."""
     import ctypes
     from ctypes import wintypes
     u, g = ctypes.windll.user32, ctypes.windll.gdi32
@@ -268,9 +156,7 @@ def ambil_jendela(hwnd: int) -> Image.Image | None:
         g.DeleteDC(mdc)
         u.ReleaseDC(hwnd, hdc)
     img = Image.frombuffer("RGB", (w, h), buf, "raw", "BGRX", 0, 1).copy()
-    if not gelap(img):
-        return img
-    return _ambil_jendela_wgc(hwnd)
+    return None if gelap(img) else img
 
 
 def game_di_depan(judul: str) -> bool:
@@ -303,22 +189,12 @@ def titik_milik(x: int, y: int, daftar_hwnd: set[int]) -> bool:
 
 def gelap(img: Image.Image) -> bool:
     """True kalau gambar nyaris hitam polos (layar mati / game fullscreen exclusive)."""
-    cv2 = _cv2()
-    if cv2 is not None:
-        abu = cv2.cvtColor(np.asarray(img.convert("RGB")), cv2.COLOR_RGB2GRAY)
-        mean, std = cv2.meanStdDev(abu)
-        return float(mean[0][0]) < 12 and float(std[0][0]) < 4
     stat = ImageStat.Stat(img.convert("L"))
     return stat.mean[0] < 12 and stat.stddev[0] < 4
 
 
 def sidik(img: Image.Image) -> Image.Image:
     """Versi mini (96x54 abu-abu) untuk membandingkan dua screenshot dengan sangat cepat."""
-    cv2 = _cv2()
-    if cv2 is not None:
-        abu = cv2.cvtColor(np.asarray(img.convert("RGB")), cv2.COLOR_RGB2GRAY)
-        mini = cv2.resize(abu, (96, 54), interpolation=cv2.INTER_LINEAR)
-        return Image.fromarray(mini, mode="L")
     return img.convert("L").resize((96, 54), Image.BILINEAR)
 
 
@@ -326,9 +202,6 @@ def beda(a: Image.Image | None, b: Image.Image) -> float:
     """Rata-rata perbedaan piksel dua sidik (0 = persis sama, 255 = beda total)."""
     if a is None or a.size != b.size:
         return 255.0
-    cv2 = _cv2()
-    if cv2 is not None:
-        return float(cv2.absdiff(np.asarray(a), np.asarray(b)).mean())
     return ImageStat.Stat(ImageChops.difference(a, b)).mean[0]
 
 
@@ -339,12 +212,6 @@ def ke_png(img: Image.Image) -> bytes:
 
 
 def ke_jpg(img: Image.Image, kualitas: int = 85) -> bytes:
-    cv2 = _cv2()
-    if cv2 is not None:
-        bgr = cv2.cvtColor(np.asarray(img.convert("RGB")), cv2.COLOR_RGB2BGR)
-        ok, enc = cv2.imencode(".jpg", bgr, [int(cv2.IMWRITE_JPEG_QUALITY), int(kualitas)])
-        if ok:
-            return enc.tobytes()
     buf = io.BytesIO()
     img.convert("RGB").save(buf, "JPEG", quality=kualitas)
     return buf.getvalue()

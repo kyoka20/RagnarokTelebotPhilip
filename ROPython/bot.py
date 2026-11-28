@@ -94,7 +94,7 @@ BANTUAN = """<b>Daftar perintah</b>
 /matikan - matikan bot sepenuhnya (menyala lagi kalau laptop restart, atau buka 4_jalankan_bot.bat)
 /batal - batalkan /input
 
-Karakter otomatis ganti begitu namanya (hijau, di bawah karakter) terbaca di layar, tanpa perlu buka info karakter."""
+Karakter otomatis ganti saat Anda membuka halaman info karakter (yang ada ID-nya)."""
 
 MENU = [("input", "Isi / ubah data pembeli"), ("daftar", "Semua karakter + DPS terakhir"),
         ("lihat", "Foto & detail karakter (contoh: /lihat 2)"), ("pilih", "Pilih karakter aktif (contoh: /pilih 2)"),
@@ -182,7 +182,7 @@ class Bot:
         self.job_cek_terakhir = 0.0
         self.nick_cek_terakhir = 0.0
         self.nama_cek_terakhir = 0.0
-        self.nama_calon: tuple | None = None  # (kunci, teks, berapa kali) nama karakter lain di tengah layar
+        self.nama_calon: str | None = None  # nama karakter lain yang baru 1x terlihat di tengah layar
         self.ikon_terakhir, self.ikon_waktu = None, 0.0
         self.isian: dict[int, dict] = {}  # /input yang sedang berjalan, per chat
         self.ragu: dict[int, int] = {}  # DPS yang Total-nya belum cocok -> berapa kali terbaca
@@ -1147,121 +1147,50 @@ class Bot:
         nick, id_game = info
         self.karakter_terlihat(nick, id_game)
 
-    @staticmethod
-    def _mirip_nick(a: str, b: str) -> float:
-        a, b = ocr._norm(a), ocr._norm(b)
-        if not a or not b:
-            return 0.0
-        return 1.0 if a == b else difflib.SequenceMatcher(None, a, b).ratio()
-
-    def _profil_dari_nick(self, teks: str, aktif: str) -> tuple[str | None, float]:
-        """Profil yang nick-nya paling mirip `teks` (profil aktif / yang punya ID didahulukan kalau seri)."""
-        terbaik: tuple[str | None, float] = (None, 0.0)
-        with self.kunci:
-            urut = sorted(self.cfg["profil"].items(),
-                          key=lambda kp: (kp[0] != aktif, not kp[1].get("id_game")))
-            for k, p in urut:
-                s = self._mirip_nick(teks, str(p.get("nick") or ""))
-                if s > terbaik[1]:
-                    terbaik = (k, s)
-        return terbaik
-
     def cek_nama_karakter(self, cfg_ocr: dict) -> None:
-        """Tiap 6 detik (saat layar hasil tidak tampil): baca nama hijau di bawah karakter kita.
-        - Nama karakter aktif terlihat -> diam.
-        - Nama karakter LAIN yang sudah dikenal -> pindah (harus terbaca 2x berturut-turut).
-        - Nama yang BELUM pernah dikenal -> karakter baru, catatan dibuat (harus terbaca 3x).
-        Tidak perlu lagi membuka Character Info. Saat ada calon, dicek ulang tiap 2 detik."""
-        if time.time() - self.nama_cek_terakhir < (2 if self.nama_calon else 6):
+        """Tiap 10 detik (saat layar hasil tidak tampil): baca nama karakter di tengah layar game.
+        Kalau itu karakter LAIN yang sudah dikenal (ada di /daftar), pindah otomatis.
+        Harus terlihat 2x berturut-turut, dan nama karakter aktif tidak boleh ikut terlihat
+        (supaya tidak pindah gara-gara pemain lain lewat)."""
+        if time.time() - self.nama_cek_terakhir < 6:
             return
         if self.afk_mulai is not None:
             return  # AFK (game tidak disentuh): ganti karakter mustahil -> hemat CPU, tidak OCR tiap 6 detik
         self.nama_cek_terakhir = time.time()
+        with self.kunci:
+            aktif = self.pid
+            # Nick dobel (mis. profil lama tanpa ID): pakai profil aktif / yang punya ID game.
+            urut = sorted(self.cfg["profil"].items(), key=lambda kp: (kp[0] == aktif, bool(kp[1].get("id_game"))))
+            per_nick = {str(p.get("nick") or "").lower(): k for k, p in urut if p.get("nick")}
+            nicks = {k: str(self.cfg["profil"][k]["nick"]) for k in per_nick.values()}
         img = self.foto_game(None)
         if img is None:
             return
         try:
-            semua = job.baca_nama_tengah(img, cfg_ocr)
+            terlihat = job.nama_di_tengah(img, cfg_ocr, nicks)
         except Exception as e:
             self.log.warning("Baca nama karakter gagal: %s", e)
             return
-        if not semua:
-            return  # nama tertutup / sedang loading: calon lama tetap ditunggu
-        with self.kunci:
-            aktif, nick_aktif = self.pid, str(self.profil.get("nick") or "")
-        if nick_aktif and any(self._mirip_nick(t, nick_aktif) >= 0.8 for t in semua):
+        lain = terlihat - {aktif}
+        if aktif in terlihat or len(lain) != 1:
             self.nama_calon = None
             return
-        teks = semua[0]  # huruf paling besar = nama karakter kita
-        pid, skor = self._profil_dari_nick(teks, aktif)
-        if pid == aktif and skor >= 0.8:
-            self.nama_calon = None
+        pid = lain.pop()
+        if pid != self.nama_calon:
+            self.nama_calon = pid
             return
-        if skor >= 0.85:
-            kunci, butuh = pid, 2
-        elif skor >= 0.7:
-            self.nama_calon = None  # mirip nick lain tapi ragu: jangan bikin karakter baru
-            return
-        else:
-            kunci, butuh = "baru:" + ocr._norm(teks), 3
-        c = self.nama_calon
-        sama = c and (c[0] == kunci or (kunci.startswith("baru:") and c[0].startswith("baru:")
-                                        and self._mirip_nick(c[0][5:], kunci[5:]) >= 0.85))
-        self.nama_calon = (c[0], c[1], c[2] + 1) if sama else (kunci, teks, 1)
-        if self.nama_calon[2] < butuh:
-            return
-        teks = self.nama_calon[1]
         self.nama_calon = None
-        if not kunci.startswith("baru:"):
-            with self.kunci:
-                p = self.cfg["profil"][pid]
-                nick, id_game = str(p.get("nick")), str(p.get("id_game") or "")
-            self.log.info("Nama karakter di layar: %s -> pindah profil %s", teks, pid)
-            if id_game:
-                self.karakter_terlihat(nick, id_game)
-                return
-            with self.kunci:
-                pid_lama = self.pid
-                self._aktifkan_profil(pid)
-            self.siarkan_teks(f"🔄 <b>Ganti karakter: {html.escape(nick)}</b> (nama terbaca di layar)\n"
-                              "Lihat semua karakter: /daftar" + self._catatan_hasil_lama(pid_lama, nick))
-            return
-        self.karakter_baru_dari_nama(teks)
-
-    def karakter_baru_dari_nama(self, nick: str) -> None:
-        """Nama hijau yang belum dikenal terbaca stabil = ganti ke karakter baru.
-        ID game belum diketahui; terisi sendiri kalau nanti Character Info kebetulan dibuka."""
         with self.kunci:
-            pid_lama, aktif = self.pid, self.profil
-            if not aktif.get("nick") and not aktif.get("id_game") and not catatan.baca_ok(pid_lama):
-                aktif["nick"] = nick  # profil kosong (belum pernah ada hasil): cukup beri nama
-                self.simpan()
-                self.log.info("Nick profil %s terbaca di layar: %s", pid_lama, nick)
-                return
-            pid = umum.id_profil(nick)
-            n = 2
-            while pid in self.cfg["profil"]:
-                pid, n = f"{umum.id_profil(nick)}_{n}", n + 1
-            baru = copy.deepcopy(umum.PROFIL_DEFAULT)
-            baru.update(nama=nick, nick=nick, id_game="", target=aktif.get("target"),
-                        label=aktif.get("label", "DMG Per Second"), area=aktif.get("area"), dari_nama=True)
-            self.cfg["profil"][pid] = baru
+            p = self.cfg["profil"][pid]
+            nick, id_game = str(p.get("nick")), str(p.get("id_game") or "")
+        self.log.info("Nama karakter di layar: %s -> pindah profil", nick)
+        if id_game:
+            self.karakter_terlihat(nick, id_game)
+            return
+        with self.kunci:
             self._aktifkan_profil(pid)
-        self.log.info("Nama baru di layar: %s -> profil baru %s", nick, pid)
         self.siarkan_teks(f"🔄 <b>Ganti karakter: {html.escape(nick)}</b> (nama terbaca di layar)\n"
-                          "Karakter baru, catatannya dibuat.\n👉 Isi job & data pembeli: /input\n"
-                          "Kalau ternyata salah, ketik /pilih untuk memilih karakter yang benar."
-                          + self._catatan_hasil_lama(pid_lama, nick))
-
-    def _catatan_hasil_lama(self, pid_lama: str, nick: str) -> str:
-        """Peringatan kalau hasil DPS terakhir (<1 jam) tadi masuk ke karakter sebelumnya."""
-        h = self.hasil_terakhir
-        if not (h and h["pid"] == pid_lama and time.time() - h["jam"] <= 60 * 60):
-            return ""
-        lama_nama = self.nama_akun(self.cfg["profil"].get(pid_lama, {}))
-        return (f"\n\n⚠️ Hasil terakhir DPS <b>{umum.fmt(h['dps'])}</b> ({h['waktu'][11:]}) "
-                f"tadi masuk ke <b>{lama_nama}</b>.\nKalau itu milik "
-                f"<b>{html.escape(nick)}</b>, ketik /pindah")
+                          "Lihat semua karakter: /daftar")
 
     def _aktifkan_profil(self, pid: str) -> None:
         """Pindah ke profil lain (panggil di dalam self.kunci)."""
@@ -1278,12 +1207,9 @@ class Bot:
         ke catatan karakter itu (dibuat baru kalau belum pernah ada). Kunci = ID game."""
         with self.kunci:
             pid_lama, aktif = self.pid, self.profil
-            punya_id = next((k for k, p in self.cfg["profil"].items() if p.get("id_game") == id_game), None)
             sama = (aktif.get("id_game") == id_game
-                    or (not aktif.get("id_game") and punya_id is None
-                        and (not aktif.get("nick") or self._mirip_nick(aktif["nick"], nick) >= 0.8)))
+                    or (not aktif.get("id_game") and aktif.get("nick") in ("", None, nick)))
             if sama:
-                diam = bool(aktif.pop("dari_nama", None))  # profil dari nama di layar: cukup isi ID, tanpa kabar
                 if aktif.get("nick") == nick and aktif.get("id_game") == id_game:
                     return
                 if aktif.get("nick") and aktif.get("id_game") == id_game:
@@ -1296,9 +1222,6 @@ class Bot:
                     return
                 aktif["nick"], aktif["id_game"] = nick, id_game
                 self.simpan()
-                if diam:
-                    self.log.info("ID %s terisi untuk profil %s (%s)", id_game, pid_lama, nick)
-                    return
                 pesan = (f"👤 Nick terbaca: <b>{html.escape(nick)}</b> (ID {id_game})\n"
                          "Mulai sekarang tampil sebagai Akun di laporan.")
             else:
@@ -1319,16 +1242,14 @@ class Bot:
                     lanjut = ("Catatan lama dilanjutkan. DPS terakhir: "
                               f"{umum.fmt(data[-1]['dps'])}" if data else "Catatan lama dilanjutkan.")
                 self._aktifkan_profil(pid)
-                # Profil sementara dari nama di layar ternyata karakter lama (ber-ID): buang kalau masih kosong.
-                if (aktif.get("dari_nama") and not aktif.get("id_game") and not catatan.baca_ok(pid_lama)
-                        and self._mirip_nick(str(aktif.get("nick") or ""), nick) >= 0.7):
-                    self.cfg["profil"].pop(pid_lama, None)
-                    self.simpan()
-                    self.log.info("Profil sementara %s digabung ke %s", pid_lama, pid)
                 pesan = (f"🔄 <b>Ganti karakter: {html.escape(nick)}</b> (ID {id_game})\n{lanjut}\n"
                          "Lihat semua karakter: /daftar")
-                if pid_lama in self.cfg["profil"]:
-                    pesan += self._catatan_hasil_lama(pid_lama, nick)
+                h = self.hasil_terakhir
+                if h and h["pid"] == pid_lama and time.time() - h["jam"] <= 60 * 60:
+                    lama_nama = self.nama_akun(self.cfg["profil"].get(pid_lama, {}))
+                    pesan += (f"\n\n⚠️ Hasil terakhir DPS <b>{umum.fmt(h['dps'])}</b> ({h['waktu'][11:]}) "
+                              f"tadi masuk ke <b>{lama_nama}</b>.\nKalau itu milik "
+                              f"<b>{html.escape(nick)}</b>, ketik /pindah")
         self.log.info("Karakter terlihat: %s (ID %s) -> profil %s", nick, id_game, self.pid)
         self.siarkan_teks(pesan)
 
@@ -1428,8 +1349,6 @@ class Bot:
                 except Exception:
                     self.log.exception("Error saat cek (bot tetap jalan)")
             interval = max(1, int(self.cfg.get("interval_detik", 2)))
-            if autoupdate.beban_cpu_tinggi():
-                interval = min(interval * 2, 6)  # hemat CPU saat laptop sedang berat
             self.bangun.wait(interval)
             self.bangun.clear()
 
@@ -1552,7 +1471,6 @@ class Bot:
             "/batu": self.p_batu, "/saran_batu": self.p_batu, "/gem_saran": self.p_batu,
             "/record_train": self.p_rekam, "/rekam": self.p_rekam, "/train": self.p_rekam,
             "/stop_train": self.p_rekam_stop, "/rekam_stop": self.p_rekam_stop,
-            "/cek_laptop": self.p_cek_laptop, "/cek_lemot": self.p_cek_laptop,
         }.get(perintah)
         if fungsi is None:
             self.balas(chat_id, "Perintah tidak dikenal. Ketik /help")
@@ -1570,16 +1488,6 @@ class Bot:
             self.balas(chat_id, f"Screenshot gagal: {html.escape(str(e))}")
             return
         self.siarkan_foto(f"🖥 Layar penuh - {datetime.now():%d/%m/%Y %H:%M:%S}", [("layar.jpg", foto)], [chat_id])
-
-    def p_cek_laptop(self, chat_id, isi):
-        """/cek_laptop - cek siapa pemakan CPU & RAM terbesar di laptop (bot kita vs aplikasi lain)."""
-        self.balas(chat_id, "🩺 Mengecek CPU & RAM laptop (1 detik)...")
-        def _kerja():
-            try:
-                self.balas(chat_id, autoupdate.diagnosa_laptop())
-            except Exception as e:
-                self.balas(chat_id, f"❌ Gagal diagnosa laptop: {html.escape(str(e))}")
-        threading.Thread(target=_kerja, daemon=True, name="cek-laptop").start()
 
     def p_status(self, chat_id, isi):
         with self.kunci:
@@ -1839,8 +1747,7 @@ class Bot:
         gif_bytes, r = hasil
         cap = (f"🎬 <b>{self.nama_akun(p)}</b>: {umum.fmt(r['awal'])} → <b>{umum.fmt(r['terbaik'])}</b> "
                f"({r['naik']:+.1f}%)".replace(".", ","))
-        ext = "mp4" if r.get("format") == "mp4" else "gif"
-        self.kirim.tambah("gif", self.tg.kirim_animasi, chat_id, gif_bytes, cap, f"progres_dps.{ext}")
+        self.kirim.tambah("gif", self.tg.kirim_animasi, chat_id, gif_bytes, cap, "progres_dps.gif")
 
     def p_story(self, chat_id, isi):
         """/story [nama/nomor] - poster vertikal 9:16 siap upload WA Status / TikTok / IG Story."""
@@ -1922,12 +1829,11 @@ class Bot:
             try:
                 g = visual.buat_gif(calon[0], calon[1], kaki)
                 if g:
-                    gif_bytes, r_g = g
-                    ext = "mp4" if r_g.get("format") == "mp4" else "gif"
+                    gif_bytes, _ = g
                     for cid in self.penerima:
                         self.kirim.tambah("tutor-gif", self.tg.kirim_animasi, cid, gif_bytes,
                                           f"🎬 Contoh <b>/gif</b> ({self.nama_akun(calon[1])}) — tinggal forward ke klien!",
-                                          f"contoh_progres.{ext}")
+                                          "contoh_progres.gif")
             except Exception:
                 self.log.exception("Gagal kirim contoh gif")
 
@@ -2099,10 +2005,6 @@ class Bot:
         with self.kunci:
             aktif = self.profil
             pid = next((k for k, p in self.cfg["profil"].items() if p.get("id_game") == d["id_game"]), None)
-            if (pid is None and not aktif.get("id_game") and aktif.get("nick")
-                    and self._mirip_nick(aktif["nick"], d.get("nick") or aktif["nick"]) >= 0.8):
-                pid = self.pid  # karakter aktif dari nama di layar (belum ber-ID): lengkapi profil ini
-                aktif.pop("dari_nama", None)
             baru = pid is None
             if baru:
                 pid = umum.id_profil(d.get("nick") or f"id_{d['id_game']}")
@@ -2719,14 +2621,6 @@ class Bot:
                 self.balas(chat_id, f"❌ Gagal menulis file ({html.escape(str(e))}). File lama dikembalikan.")
             return False
 
-        if "requirements.txt" in berkas:
-            try:
-                ok_req, msg_req = autoupdate.pasang_requirements(self.log, paksa=True)
-                if not ok_req:
-                    self.log.warning("Auto-install requirements saat update: %s", msg_req)
-            except Exception:
-                self.log.exception("Error tak terduga saat auto-install requirements")
-
         try:
             uji = subprocess.run([sys.executable, "-c", "import bot"], cwd=str(umum.FOLDER), capture_output=True,
                                  timeout=180, env={**os.environ, "PYTHONIOENCODING": "utf-8"},
@@ -2771,19 +2665,14 @@ class Bot:
         if not isi:
             info = autoupdate.info_config(self.cfg)
             sha = autoupdate.sha_lokal()
-            st_boost = autoupdate.status_modul_boost()
-            aktif_b = [k for k, v in st_boost.items() if v]
-            sys_info = autoupdate.info_sistem()
             self.balas(chat_id,
                        "🔄 <b>Auto-Update GitHub</b>\n"
                        f"• Status: <b>{'AKTIF' if info['aktif'] and info['repo'] else 'MATI'}</b>\n"
                        f"• Repo: <code>{html.escape(info['repo'] or '(belum diatur)')}</code> (branch: <code>{html.escape(info['branch'])}</code>)\n"
                        f"• Token private: {'✅ terpasang' if info['token'] else '— (repo publik)'}\n"
                        f"• Cek tiap: {info['interval_menit']} menit\n"
-                       f"• Commit terakhir: <code>{html.escape(sha[:10] if sha else '-')}</code>\n"
-                       f"• Modul boost: <code>{html.escape(', '.join(aktif_b) if aktif_b else 'belum ada')}</code>\n"
-                       + (f"• Kesehatan laptop: <code>{html.escape(sys_info)}</code>\n" if sys_info else "")
-                       + "\nPerintah:\n"
+                       f"• Commit terakhir: <code>{html.escape(sha[:10] if sha else '-')}</code>\n\n"
+                       "Perintah:\n"
                        "• <code>/auto_update owner/repo</code> (atau + branch)\n"
                        "• <code>/auto_update token ghp_...</code> (untuk repo private)\n"
                        "• <code>/auto_update cek</code> (tarik update sekarang)\n"
@@ -3065,25 +2954,6 @@ class Bot:
 
     # ------------------------------------------------------------ mulai
 
-    def loop_pasang_paket(self) -> None:
-        """Satu kali saat startup: pastikan paket di requirements.txt (OpenCV, RapidOCR, dll.) terpasang."""
-        time.sleep(8)
-        if self.berhenti.is_set():
-            return
-        try:
-            baru, msg = autoupdate.pasang_requirements(self.log, paksa=False)
-            if baru:
-                import telegram_api
-                for mod in (umum, ocr, layar, job, autoupdate, telegram_api, visual, datagame):
-                    fn = getattr(mod, "reset_cache_boost", None)
-                    if fn:
-                        fn()
-                for cid in self.dev_ids:
-                    self.kirim.tambah("kabar boost", self.tg.kirim_teks, cid,
-                                      f"⚡ <b>Modul boost otomatis terpasang</b>: {html.escape(msg)}")
-        except Exception:
-            self.log.exception("Gagal cek/pasang paket boost saat startup")
-
     def jalankan(self) -> None:
         FILE_DIMATIKAN.unlink(missing_ok=True)  # dinyalakan lagi = penjaga boleh menjaga lagi
         self.kirim.start()
@@ -3092,7 +2962,6 @@ class Bot:
         threading.Thread(target=self.loop_harian, daemon=True, name="harian").start()
         threading.Thread(target=self.loop_auto_update, daemon=True, name="auto-update").start()
         threading.Thread(target=self.loop_sync_log, daemon=True, name="sync-log").start()
-        threading.Thread(target=self.loop_pasang_paket, daemon=True, name="pasang-paket").start()
         catatan.sesi_mulai(self.pid)
         # Menu "/" di Telegram = hanya perintah yang dipakai (yang lama ikut hilang dari menu).
         self.kirim.tambah("menu perintah", self.tg.panggil, "setMyCommands",

@@ -17,7 +17,6 @@ from PIL import Image
 
 import catatan
 import ocr
-import umum
 
 # Nama stat di halaman Detailed Stats (nama lengkap; di layar sering terpotong).
 STAT = """
@@ -96,7 +95,7 @@ def nama_resmi(label: str, nilai: str) -> str | None:
         return None
     calon = [s for s, ks in _KUNCI_STAT.items() if k in ks]
     if not calon:
-        skor = sorted(((ocr._rasio_mirip(k, ks), s) for s, ks in _KUNCI_STAT.items()), reverse=True)
+        skor = sorted(((difflib.SequenceMatcher(None, k, ks).ratio(), s) for s, ks in _KUNCI_STAT.items()), reverse=True)
         if skor[0][0] < 0.72:
             return None
         calon = [s for r, s in skor if r >= skor[0][0] - 0.02]
@@ -115,9 +114,9 @@ def baca_status(img: Image.Image, cfg_ocr: dict) -> dict[str, str]:
     W, H = img.size
     panel = img.crop((int(W * 0.55), 0, W, H))
     skala = max(1.0, 1300 / panel.width)
-    if skala > 1.01:
-        panel = ocr.siapkan_gambar(panel, "asli", skala)
-    kata, _ = ocr._jalankan_mesin(panel, cfg_ocr, prioritas="akurat")
+    if skala > 1:
+        panel = panel.resize((int(panel.width * skala), int(panel.height * skala)), Image.LANCZOS)
+    kata, _ = ocr._jalankan_mesin(panel, cfg_ocr)
     hasil: dict[str, str] = {}
     for baris in ocr._kelompokkan_baris(kata):
         label: list[str] = []
@@ -166,7 +165,8 @@ def simpan(pid: str, status: dict[str, str], waktu: datetime) -> None:
     if not status:
         return
     with _file_log(pid).open("a", encoding="utf-8") as fh:
-        fh.write(umum.json_dumps({"waktu": waktu.strftime(catatan.FORMAT_WAKTU), "status": status}) + "\n")
+        fh.write(json.dumps({"waktu": waktu.strftime(catatan.FORMAT_WAKTU), "status": status},
+                            ensure_ascii=False) + "\n")
 
 
 def baca_log(pid: str) -> list[tuple[datetime, dict[str, str]]]:
@@ -176,7 +176,7 @@ def baca_log(pid: str) -> list[tuple[datetime, dict[str, str]]]:
     hasil = []
     for baris in f.read_text(encoding="utf-8").splitlines():
         try:
-            d = umum.json_loads(baris)
+            d = json.loads(baris)
             hasil.append((datetime.strptime(d["waktu"], catatan.FORMAT_WAKTU), d["status"]))
         except (ValueError, KeyError):
             continue

@@ -18,38 +18,10 @@ import shutil
 import sys
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
 import umum
-
-_httpx_mod = None
-_httpx_dicek = False
-
-
-def _buat_sesi():
-    """Buat HTTP client: utamakan httpx HTTP/2 bila terpasang, fallback ke requests.Session."""
-    global _httpx_mod, _httpx_dicek
-    if not _httpx_dicek:
-        _httpx_dicek = True
-        try:
-            import httpx  # type: ignore
-            _httpx_mod = httpx
-        except Exception:
-            _httpx_mod = None
-    if _httpx_mod is not None:
-        try:
-            return _httpx_mod.Client(http2=True, headers=HEADER, timeout=60.0)
-        except Exception:
-            return _httpx_mod.Client(http2=False, headers=HEADER, timeout=60.0)
-    import requests
-    return requests.Session()
-
-
-def reset_cache_boost() -> None:
-    global _httpx_dicek
-    _httpx_dicek = False
 
 SITUS = "https://roworlddb.com"
 BAHASA = "en-US"  # sama dengan bahasa di game, supaya nama item cocok dengan yang terbaca di layar
@@ -85,13 +57,9 @@ def _get(sesi, path: str, versi: str = "", json_: bool = True):
 
 
 def versi_situs(sesi=None) -> str:
-    tutup = sesi is None
-    sesi = sesi or _buat_sesi()
-    try:
-        html = _get(sesi, "/sea/equipment/", json_=False)
-    finally:
-        if tutup:
-            sesi.close()
+    import requests
+    sesi = sesi or requests.Session()
+    html = _get(sesi, "/sea/equipment/", json_=False)
     m = re.search(r"\?v=(\d{8}-\d{6})", html)
     if not m:
         raise DatabaseError("Versi data di situs tidak ditemukan (tampilan situs mungkin berubah).")
@@ -100,67 +68,58 @@ def versi_situs(sesi=None) -> str:
 
 def info_lokal() -> dict:
     try:
-        return umum.json_loads(FILE_VERSI.read_bytes())
+        return json.loads(FILE_VERSI.read_text(encoding="utf-8"))
     except Exception:
         return {}
 
 
 def perbarui(paksa: bool = False, log=print) -> tuple[bool, str]:
     """Unduh database kalau situsnya sudah update. Hasil: (ada perubahan?, pesan)."""
+    import requests
     with _kunci:
-        sesi = _buat_sesi()
-        try:
-            versi = versi_situs(sesi)
-            lama = info_lokal()
-            if not paksa and lama.get("versi") == versi and all((FOLDER_DB / f).exists() for f in FILE_DATA):
-                lama["dicek"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                FILE_VERSI.write_text(json.dumps(lama, indent=2, ensure_ascii=False), encoding="utf-8")
-                return False, f"Database sudah terbaru (versi {versi})."
+        sesi = requests.Session()
+        versi = versi_situs(sesi)
+        lama = info_lokal()
+        if not paksa and lama.get("versi") == versi and all((FOLDER_DB / f).exists() for f in FILE_DATA):
+            lama["dicek"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            FILE_VERSI.write_text(json.dumps(lama, indent=2, ensure_ascii=False), encoding="utf-8")
+            return False, f"Database sudah terbaru (versi {versi})."
 
-            log(f"Mengunduh database versi {versi} dari {SITUS} ...")
-            baru = FOLDER_DB.with_name("database_unduh")
-            shutil.rmtree(baru, ignore_errors=True)
-            (baru / "skill").mkdir(parents=True)
-            data = {}
-            for nama, path in FILE_DATA.items():
-                data[nama] = _get(sesi, path, versi)
-                (baru / nama).write_text(umum.json_dumps(data[nama]), encoding="utf-8")
-                log(f"  {nama} OK")
-            jobs = [j for j in data["skill_index.json"]["jobs"].values() if j.get("has_skills")]
-            if _httpx_mod is not None and len(jobs) > 1:
-                def _unduh_job(j):
-                    isi = _get(sesi, f"/sea/skill-simulator/data/jobs_{BAHASA}/{j['job_id']}.json", versi)
-                    (baru / "skill" / f"{j['job_id']}.json").write_text(umum.json_dumps(isi), encoding="utf-8")
-                with ThreadPoolExecutor(max_workers=4) as ex:
-                    list(ex.map(_unduh_job, jobs))
-            else:
-                for j in jobs:
-                    isi = _get(sesi, f"/sea/skill-simulator/data/jobs_{BAHASA}/{j['job_id']}.json", versi)
-                    (baru / "skill" / f"{j['job_id']}.json").write_text(umum.json_dumps(isi), encoding="utf-8")
-                    time.sleep(0.2)  # sopan ke server situs
-            log(f"  skill {len(jobs)} job OK")
-            _unduh_gem(sesi, versi, baru)
-            log("  gem OK")
+        log(f"Mengunduh database versi {versi} dari {SITUS} ...")
+        baru = FOLDER_DB.with_name("database_unduh")
+        shutil.rmtree(baru, ignore_errors=True)
+        (baru / "skill").mkdir(parents=True)
+        data = {}
+        for nama, path in FILE_DATA.items():
+            data[nama] = _get(sesi, path, versi)
+            (baru / nama).write_text(json.dumps(data[nama], ensure_ascii=False), encoding="utf-8")
+            log(f"  {nama} OK")
+        jobs = [j for j in data["skill_index.json"]["jobs"].values() if j.get("has_skills")]
+        for j in jobs:
+            isi = _get(sesi, f"/sea/skill-simulator/data/jobs_{BAHASA}/{j['job_id']}.json", versi)
+            (baru / "skill" / f"{j['job_id']}.json").write_text(json.dumps(isi, ensure_ascii=False), encoding="utf-8")
+            time.sleep(0.2)  # sopan ke server situs
+        log(f"  skill {len(jobs)} job OK")
+        _unduh_gem(sesi, versi, baru)
+        log("  gem OK")
 
-            info = {"versi": versi, "sumber": SITUS + "/sea/", "bahasa": BAHASA,
-                    "diunduh": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "dicek": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "jumlah": {"equipment": len(data["equipment.json"]["items"]),
-                               "kartu": len(data["kartu.json"]["cards"]), "job": len(jobs)}}
-            (baru / "versi.json").write_text(json.dumps(info, indent=2, ensure_ascii=False), encoding="utf-8")
-            # Ganti folder lama sekaligus, supaya tidak pernah setengah-lama setengah-baru.
-            cadangan = FOLDER_DB.with_name("database_lama")
-            shutil.rmtree(cadangan, ignore_errors=True)
-            if FOLDER_DB.exists():
-                os.replace(FOLDER_DB, cadangan)
-            os.replace(baru, FOLDER_DB)
-            shutil.rmtree(cadangan, ignore_errors=True)
-            _cache.clear()
-            j = info["jumlah"]
-            return True, (f"Database diperbarui ke versi {versi}: {j['equipment']} equipment, "
-                          f"{j['kartu']} kartu, skill {j['job']} job.")
-        finally:
-            sesi.close()
+        info = {"versi": versi, "sumber": SITUS + "/sea/", "bahasa": BAHASA,
+                "diunduh": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "dicek": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "jumlah": {"equipment": len(data["equipment.json"]["items"]),
+                           "kartu": len(data["kartu.json"]["cards"]), "job": len(jobs)}}
+        (baru / "versi.json").write_text(json.dumps(info, indent=2, ensure_ascii=False), encoding="utf-8")
+        # Ganti folder lama sekaligus, supaya tidak pernah setengah-lama setengah-baru.
+        cadangan = FOLDER_DB.with_name("database_lama")
+        shutil.rmtree(cadangan, ignore_errors=True)
+        if FOLDER_DB.exists():
+            os.replace(FOLDER_DB, cadangan)
+        os.replace(baru, FOLDER_DB)
+        shutil.rmtree(cadangan, ignore_errors=True)
+        _cache.clear()
+        j = info["jumlah"]
+        return True, (f"Database diperbarui ke versi {versi}: {j['equipment']} equipment, "
+                      f"{j['kartu']} kartu, skill {j['job']} job.")
 
 
 FOLDER_IKON = umum.FOLDER / "database_ikon"  # terpisah, supaya tidak ikut terhapus saat database diganti
@@ -180,36 +139,28 @@ def ikon_dibutuhkan() -> dict[str, str]:
 def unduh_ikon(log=print) -> int:
     """Unduh gambar ikon equip & kartu yang belum ada (untuk mengenali ikon di layar game).
     Hasil: jumlah ikon yang baru diunduh."""
-    sesi = _buat_sesi()
-    try:
-        FOLDER_IKON.mkdir(parents=True, exist_ok=True)
-        versi = info_lokal().get("versi", "")
-        peta = _get(sesi, "/sea/skill-simulator/data/icon_paths.json", versi)
-        perlu = [n for n in ikon_dibutuhkan() if not (FOLDER_IKON / f"{n}.webp").exists()]
-        if perlu:
-            log(f"Mengunduh {len(perlu)} ikon ...")
-        def _satu(n: str) -> int:
-            path = peta.get(n) or peta.get(n.lower())
-            url = SITUS + ("/media/images/" + str(path).replace("\\", "/") if path else f"/media/images/item/{n}.png")
-            url = re.sub(r"\.png$", ".webp", url, flags=re.I)
-            try:
-                r = sesi.get(url, headers=HEADER, timeout=30)
-                if r.status_code == 200 and r.content:
-                    (FOLDER_IKON / f"{n}.webp").write_bytes(r.content)
-                    return 1
-            except Exception as e:  # noqa: BLE001
-                log(f"  ikon {n} gagal: {e}")
-            return 0
-        if _httpx_mod is not None and len(perlu) > 1:
-            with ThreadPoolExecutor(max_workers=4) as ex:
-                return sum(ex.map(_satu, perlu))
-        baru = 0
-        for n in perlu:
-            baru += _satu(n)
-            time.sleep(0.05)  # sopan ke server situs
-        return baru
-    finally:
-        sesi.close()
+    import requests
+    sesi = requests.Session()
+    FOLDER_IKON.mkdir(parents=True, exist_ok=True)
+    versi = info_lokal().get("versi", "")
+    peta = _get(sesi, "/sea/skill-simulator/data/icon_paths.json", versi)
+    perlu = [n for n in ikon_dibutuhkan() if not (FOLDER_IKON / f"{n}.webp").exists()]
+    if perlu:
+        log(f"Mengunduh {len(perlu)} ikon ...")
+    baru = 0
+    for n in perlu:
+        path = peta.get(n) or peta.get(n.lower())
+        url = SITUS + ("/media/images/" + str(path).replace("\\", "/") if path else f"/media/images/item/{n}.png")
+        url = re.sub(r"\.png$", ".webp", url, flags=re.I)
+        try:
+            r = sesi.get(url, headers=HEADER, timeout=30)
+            if r.status_code == 200 and r.content:
+                (FOLDER_IKON / f"{n}.webp").write_bytes(r.content)
+                baru += 1
+        except Exception as e:  # noqa: BLE001
+            log(f"  ikon {n} gagal: {e}")
+        time.sleep(0.05)  # sopan ke server situs
+    return baru
 
 
 def _unduh_gem(sesi, versi: str, folder: Path) -> None:
@@ -227,7 +178,7 @@ def enchant_lokal(gabung: bool = True) -> dict:
     """Database enchant yang dipelajari dari layar game (set, gem per level). Boleh diedit manual.
     gabung=True: ikut sertakan hasil belajar otomatis bot (database_lokal/enchant_belajar.json)."""
     try:
-        db = umum.json_loads(FILE_ENCHANT.read_bytes())
+        db = json.loads(FILE_ENCHANT.read_text(encoding="utf-8"))
     except Exception:
         db = {"gem": {}, "set": {}}
     if not gabung:
@@ -270,7 +221,7 @@ def _muat(nama: str):
             _unduh_gem(requests.Session(), info_lokal().get("versi", ""), FOLDER_DB)
         if not f.exists():
             raise DatabaseError("Database belum diunduh. Jalankan 8_perbarui_database.bat")
-        _cache[nama] = umum.json_loads(f.read_bytes())
+        _cache[nama] = json.loads(f.read_text(encoding="utf-8"))
     return _cache[nama]
 
 
@@ -279,7 +230,7 @@ def _skill_semua() -> list[dict]:
     if "_skill" not in _cache:
         hasil = []
         for f in sorted((FOLDER_DB / "skill").glob("*.json")):
-            j = umum.json_loads(f.read_bytes())
+            j = json.loads(f.read_text(encoding="utf-8"))
             for kel in ("skills", "unique_skills"):
                 isi = j.get(kel) or {}
                 for sid, s in (isi.items() if isinstance(isi, dict) else enumerate(isi)):

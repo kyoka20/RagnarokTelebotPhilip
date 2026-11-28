@@ -8,26 +8,6 @@ import time
 
 import requests
 
-_httpx_mod = None
-_httpx_dicek = False
-
-
-def _httpx():
-    global _httpx_mod, _httpx_dicek
-    if not _httpx_dicek:
-        _httpx_dicek = True
-        try:
-            import httpx  # type: ignore
-            _httpx_mod = httpx
-        except Exception:
-            _httpx_mod = None
-    return _httpx_mod
-
-
-def reset_cache_boost() -> None:
-    global _httpx_dicek
-    _httpx_dicek = False
-
 
 class TelegramError(Exception):
     """Ditolak Telegram (mis. token salah). Tidak ada gunanya dicoba ulang."""
@@ -73,7 +53,7 @@ class Telegram:
         # supaya yang satu tidak mengganggu yang lain.
         self._lokal = threading.local()
 
-    def _sesi(self, baru: bool = False):
+    def _sesi(self, baru: bool = False) -> requests.Session:
         s = getattr(self._lokal, "sesi", None)
         # Sambungan yang lama diam (> 45 detik) sering sudah diputus diam-diam oleh router,
         # dan memakainya bisa macet ~20 detik. Lebih cepat buat sambungan baru.
@@ -81,24 +61,10 @@ class Telegram:
         if sekarang - getattr(self._lokal, "terakhir", sekarang) > 45:
             baru = True
         self._lokal.terakhir = sekarang
-        hx = _httpx()
-        pakai_hx = hx is not None
-        if s is not None and (baru or getattr(self._lokal, "pakai_hx", False) != pakai_hx):
-            try:
+        if s is None or baru:
+            if s is not None:
                 s.close()
-            except Exception:
-                pass
-            s = None
-        if s is None:
-            if pakai_hx:
-                try:
-                    s = hx.Client(http2=True, timeout=30.0)
-                except Exception:
-                    s = hx.Client(http2=False, timeout=30.0)
-            else:
-                s = requests.Session()
-            self._lokal.sesi = s
-            self._lokal.pakai_hx = pakai_hx
+            s = self._lokal.sesi = requests.Session()
         return s
 
     def _bersih(self, teks: str) -> str:
@@ -106,17 +72,14 @@ class Telegram:
 
     def panggil(self, metode: str, data: dict | None = None, files: dict | None = None, timeout: float = 30):
         url = f"https://api.telegram.org/bot{self.token}/{metode}"
-        hx = _httpx()
-        err_conn = (requests.ConnectionError,) + ((hx.ConnectError, hx.RemoteProtocolError) if hx else ())
-        err_req = (requests.RequestException,) + ((hx.HTTPError,) if hx else ())
         try:
             try:
                 r = self._sesi().post(url, data=data, files=files, timeout=timeout)
-            except err_conn:
+            except requests.ConnectionError:
                 # Sambungan lama sering sudah diputus server diam-diam. Langsung coba
                 # sekali lagi dengan sambungan baru, tanpa menunggu.
                 r = self._sesi(baru=True).post(url, data=data, files=files, timeout=timeout)
-        except err_req as e:
+        except requests.RequestException as e:
             self._sesi(baru=True)
             raise TelegramSementara(self._bersih(f"{type(e).__name__}: {e}")) from None
         try:
@@ -198,14 +161,10 @@ class Telegram:
         )
 
     def kirim_animasi(self, chat_id: int, isi: bytes, caption: str = "", nama: str = "animasi.gif"):
-        is_mp4 = (len(isi) > 12 and isi[4:8] == b"ftyp") or nama.lower().endswith(".mp4")
-        if is_mp4 and not nama.lower().endswith(".mp4"):
-            nama = nama.rsplit(".", 1)[0] + ".mp4"
-        mime = "video/mp4" if is_mp4 else "image/gif"
         return self.panggil(
             "sendAnimation",
             {"chat_id": chat_id, "caption": caption[:1000], "parse_mode": "HTML"},
-            files={"animation": (nama, isi, mime)}, timeout=120,
+            files={"animation": (nama, isi, "image/gif")}, timeout=120,
         )
 
     def kirim_album(self, chat_id: int, daftar_foto: list[tuple[str, bytes]], caption: str = ""):
